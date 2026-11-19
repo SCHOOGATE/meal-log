@@ -72,7 +72,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = 'nutrition-web v0.1';
+  var VERSION = 'nutrition-web v0.1.1';
   var KEY = 'nutri_cfg';
 
   function $(i) { return document.getElementById(i); }
@@ -87,11 +87,27 @@
     h.split('&').forEach(function (kv) { var a = kv.split('='); if (a[0]) p[a[0]] = decodeURIComponent(a[1] || ''); });
     if (/^[A-Za-z0-9_-]{20,}$/.test(p.u || '') && /^[A-Za-z0-9]{16,}$/.test(p.t || '')) {
       store(KEY, JSON.stringify({ u: p.u, t: p.t }));
-      history.replaceState(null, '', location.pathname);   // 合言葉をアドレス欄に残さない
+      history.replaceState(null, '', location.pathname + location.search);   // 合言葉をアドレス欄に残さない
     }
     try { cfg = JSON.parse(store(KEY) || 'null'); } catch (e) { cfg = null; }
   })();
   if (!cfg) { $('setup').style.display = 'block'; $('app').style.display = 'none'; return; }
+
+  // ---- ?qr=1：PCで開いたとき、スマホに渡すための自分専用リンクをQRコードで出す（リンクはこの画面の外に出ない） ----
+  if (/[?&]qr=1/.test(location.search)) {
+    $('app').style.display = 'none';
+    var box = document.createElement('div'); box.className = 'card';
+    box.innerHTML = '<b>スマホのカメラでこのQRコードを読み取ってください</b><div id="qr" style="margin:16px auto;width:256px"></div>'
+      + '<div class=hint>開いたページを Chrome で表示すると、そのスマホに設定が保存されます。<br>このQRコードは人に見せたり、写真に撮って送ったりしないでください。</div>';
+    document.body.appendChild(box);
+    var s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+    s.onload = function () {
+      new QRCode($('qr'), { text: location.origin + location.pathname + '#u=' + cfg.u + '&t=' + cfg.t, width: 256, height: 256 });
+    };
+    document.head.appendChild(s);
+    return;
+  }
   var API = 'https://script.google.com/macros/s/' + cfg.u + '/exec';
 
   function api(action, body) {
