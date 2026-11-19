@@ -158,7 +158,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = 'nutrition-web v0.4';
+  var VERSION = 'nutrition-web v0.4.1';
   var KEY = 'nutri_cfg';
 
   function $(i) { return document.getElementById(i); }
@@ -436,9 +436,10 @@
       var S = r.sup || { items: [], extra: {} };
       h += '<div class=card><b>今日のサプリ</b><div style="margin-top:4px">' + (S.items.length ? S.items.map(function (x) { return '<span class=chip>' + esc(x.name) + ' ' + x.amount + esc(x.unit) + (x.noLabel ? '<span class=ref>（成分表示なし）</span>' : '') + '</span>'; }).join('') : '<span class=wait>記録がありません（「💊 サプリ」から入れられます）</span>') + '</div>'
         + (Object.keys(S.extra).length ? '<div class=ref style="margin-top:6px">表の外の成分（サプリ分）：' + Object.keys(S.extra).map(function (k) { return esc(k.replace(/\(.*\)/, '')) + ' ' + (Math.round(S.extra[k] * 100) / 100) + esc((k.match(/\((.*)\)/) || ['', ''])[1]); }).join('・') + '</div>' : '') + '</div>';
+      h += '<div class=card><b>エッセンシャルオイル（サプリから）</b><div style="margin-top:4px">' + ((S.eo || []).length ? S.eo.map(function (x) { return '<span class=chip>' + esc(x.name) + (x.main ? '<span class=ref>（主な成分：' + esc(x.main) + '）</span>' : '') + '<span class=ref>／' + x.from.map(esc).join('・') + '</span></span>'; }).join('') : '<span class=wait>今日のサプリには含まれていません</span>') + '</div><div class=hint style="margin-top:8px">各製品の原材料名（「〜油」「香料（…）」）から拾っています。量は表示されていないため出していません。</div></div>';
       h += '<div class=card><b>フィトケミカル（含まれる主なもの）</b><div style="margin-top:4px">'
         + (r.phyto.length ? r.phyto.map(function (x) { return '<span class=chip>' + esc(x.name) + '<span class=ref>（' + x.from.map(esc).join('・') + '）</span></span>'; }).join('') : '<span class=wait>今日の記録からは見つかりませんでした</span>')
-        + '</div><div class=hint style="margin-top:8px">フィトケミカルは公式の成分表に載っていないため、名前だけを出しています（量は出していません）。</div></div>';
+        + '</div><div class=hint style="margin-top:8px">フィトケミカルは公式の成分表に載っていないため、名前だけを出しています（量は出していません）。サプリの分は各製品の原材料名から拾っています。</div></div>';
       h += '<p class=hint>材料のうち成分表に当てはめられた割合：カロリーで' + r.coverage + '%（「しょうゆ・砂糖」のようにまとめた調味料などは、栄養素の計算に入っていません）。<br>出典：' + esc(r.source) + '。<br>量が違うと栄養素もずれます。記録を直すと計算し直されます。医師・栄養指導の指示があればそちらを優先してください。</p>';
       $('nubody').innerHTML = h;
     }).catch(function (e) { $('nubody').innerHTML = '<div class="card ng">計算できませんでした（' + esc(e.message) + '）</div>'; });
