@@ -13,7 +13,8 @@
 //   ・比べる基準は 日本人の食事摂取基準（2025年版）男性30〜49歳（厚生労働省の報告書の表から 11/19 読み取り）
 //   ・フィトケミカルは成分表に無いので、料理ごとに「含まれる主なもの」の名前だけ（量は出さない）
 // v0.4 2026-11-19 ドテラのサプリ（公式ページの栄養成分表示・ラベル写真からの登録）を栄養に足す。耐容上限量（2025年版・男性30〜49歳）で上限超えを出す
-var VERSION = 'nutrition-app v0.4';
+// v0.4.1 2026-11-19 サプリの原材料名からフィトケミカル・エッセンシャルオイルを出す（量は出さない）
+var VERSION = 'nutrition-app v0.4.1';
 var MAP_MODEL = 'gemini-2.5-flash';       // 当てはめ用（考えない設定。11/19 試験で23品すべて正しい番号）
 var SH_FOOD = '成分表';
 var NUT_KEYS = ['kcal', 'prot', 'fat', 'carb', 'fib', 'salt', 'k', 'ca', 'mg', 'fe', 'zn', 'va', 'vd', 've', 'b1', 'b2', 'b6', 'b12', 'fol', 'vc'];
@@ -370,6 +371,8 @@ function supMaster_() {
     o.id = String(o.id); o.name = String(o.name); o.unit = String(o.unit); o['default'] = Number(o['default']) || 1;
     NUT_KEYS.forEach(function (k) { o[k] = (o[k] === '' || o[k] == null) ? null : Number(o[k]); });
     try { o.extra = o.extra ? JSON.parse(o.extra) : {}; } catch (e) { o.extra = {}; }
+    try { o.phyto = o.phyto ? JSON.parse(o.phyto) : []; } catch (e) { o.phyto = []; }
+    try { o.eo = o.eo ? JSON.parse(o.eo) : []; } catch (e) { o.eo = []; }
     o.mine = String(o.mine || '') !== '';
     return o;
   });
@@ -448,16 +451,18 @@ function supLabel_(q) {
 }
 // その日のサプリの合計（栄養の画面用）
 function supTotals_(date) {
-  var M = supMaster_(), by = {}, tot = {}, extra = {}, items = [];
+  var M = supMaster_(), by = {}, tot = {}, extra = {}, items = [], phyto = [], eo = {};
   M.list.forEach(function (o) { by[o.id] = o; });
   NUT_KEYS.forEach(function (k) { tot[k] = 0; });
   supLogs_(date).forEach(function (x) {
     var o = by[x.id]; if (!o) return;
     NUT_KEYS.forEach(function (k) { if (o[k] != null) tot[k] += o[k] * x.amount; });
     Object.keys(o.extra).forEach(function (k) { extra[k] = (extra[k] || 0) + o.extra[k] * x.amount; });
+    (o.phyto || []).forEach(function (p) { phyto.push({ name: p, from: o.name }); });
+    (o.eo || []).forEach(function (e) { var k = e.name; (eo[k] = eo[k] || { name: k, main: e.main || '', from: [] }).from.push(o.name); });
     items.push({ name: o.name, amount: x.amount, unit: o.unit, noLabel: NUT_KEYS.every(function (k) { return o[k] == null; }) && !Object.keys(o.extra).length });
   });
-  return { tot: tot, extra: extra, items: items };
+  return { tot: tot, extra: extra, items: items, phyto: phyto, eo: Object.keys(eo).map(function (k) { return eo[k]; }) };
 }
 
 // ---------- その日の栄養 ----------
@@ -484,6 +489,8 @@ function nutri_(date) {
   });
   // サプリを足す（食事の分は food に残す）
   var S = supTotals_(D.date), food = {};
+  // サプリのフィトケミカル（原材料名から・量は不明）。「名前（原料）」の名前の部分で食事の分とまとめる
+  S.phyto.forEach(function (p) { var nm = p.name.split('（')[0]; (phyto[nm] = phyto[nm] || []).push('サプリ：' + p.from); });
   NUT_KEYS.forEach(function (k) { food[k] = tot[k]; tot[k] += S.tot[k]; });
   var e = tot.kcal || 1;
   var pfc = { prot: tot.prot * 4 / e * 100, fat: tot.fat * 9 / e * 100, carb: tot.carb * 4 / e * 100 };
