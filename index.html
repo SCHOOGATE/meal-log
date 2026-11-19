@@ -67,6 +67,19 @@
   .add{display:flex;gap:8px;margin-top:8px}
   .add input{flex:1}
   .lbl{font-size:13px;color:var(--sub);margin:16px 2px 4px}
+  .ing .fn{color:#9aa39e;font-size:11px}
+  /* 栄養の画面 */
+  .nt{width:100%;border-collapse:collapse;font-size:14px}
+  .nt td{padding:8px 4px;border-top:1px solid #eef1ef;vertical-align:middle}
+  .nt td.v{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:bold}
+  .nt .ref{font-size:11px;color:var(--sub)}
+  .nt .mb{height:6px;border-radius:3px;background:#e4e9e6;overflow:hidden;margin-top:4px}
+  .nt .mb i{display:block;height:100%}
+  .st{font-size:12px;border-radius:999px;padding:2px 8px;white-space:nowrap}
+  .st.ok{background:#e3f1e8;color:var(--green2)}.st.lo{background:#fff1dc;color:#9a5b00}.st.hi{background:#fde4e1;color:var(--red)}
+  .pfc{display:flex;height:22px;border-radius:6px;overflow:hidden;margin-top:8px;font-size:11px;color:#fff;font-weight:bold}
+  .pfc div{display:flex;align-items:center;justify-content:center;min-width:0;overflow:hidden;white-space:nowrap}
+  .chip{display:inline-block;background:var(--soft);border-radius:999px;padding:4px 10px;margin:4px 4px 0 0;font-size:13px}
 </style>
 </head>
 <body>
@@ -80,6 +93,7 @@
     <div><span class="big" id="sumk">—</span> <span class="of">/ <span id="sumt">1,800</span> kcal</span></div>
     <div class="bar" id="bar"><i></i></div>
     <div class="of" id="sumleft"></div>
+    <button class="mini" id="nubtn" type="button" style="margin-top:10px;width:100%;padding:10px">📊 今日の栄養を見る</button>
   </div>
 
   <label class="btn" for="cam">📷 写真で記録</label>
@@ -98,6 +112,12 @@
   <div id="recs"><div class="card wait">読み込み中…</div></div>
   <p class="hint">分量とカロリーは目安です。違っていたら「直す」から変えてください。医師・栄養指導の値があればそちらを優先してください。<br>記録はご自身の Google ドライブ「栄養管理アプリ」フォルダのシートだけに入ります。</p>
 </div>
+
+<!-- 栄養の画面 -->
+<div id="nu" style="display:none;position:fixed;inset:0;background:var(--bg);overflow-y:auto;z-index:11"><div class="in" style="max-width:560px;margin:0 auto;padding:16px 16px 40px">
+  <div style="display:flex;align-items:center;gap:8px"><h1 style="flex:1;margin:0" id="nutitle">今日の栄養</h1><button class="mini" id="nuclose" type="button">閉じる</button></div>
+  <div id="nubody"><div class="card wait">計算しています…</div></div>
+</div></div>
 
 <!-- 直す画面 -->
 <div id="ed"><div class="in">
@@ -121,7 +141,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = 'nutrition-web v0.2';
+  var VERSION = 'nutrition-web v0.3';
   var KEY = 'nutri_cfg';
 
   function $(i) { return document.getElementById(i); }
@@ -300,7 +320,8 @@
     $('dishes').innerHTML = cur.dishes.map(function (d, i) {
       var h = '<div class=dish data-d="' + i + '"><div class=hd><input type=text value="' + esc(d.name) + '" data-f=name><button class=x data-f=deld title="この品を消す">✕</button></div>';
       d.ings.forEach(function (x, j) {
-        h += '<div class=ing data-j="' + j + '"><div class=nm>' + esc(x.name) + '<div class=am>' + esc(x.amount) + '</div></div>';
+        h += '<div class=ing data-j="' + j + '"><div class=nm>' + esc(x.name) + '<div class=am>' + esc(x.amount) + '</div>'
+          + (x.fn ? '<div class=fn>成分表：' + esc(x.fn) + '</div>' : '') + '</div>';
         if (x.g0 > 0) {
           h += '<div class=q><button data-f=minus>−</button><input type=number inputmode=numeric value="' + Math.round(x.grams) + '" data-f=grams><span>g</span><button data-f=plus>＋</button></div>'
             + '<div class=kc>' + num(x.kcal) + '</div>';
@@ -373,6 +394,37 @@
     if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'もう一度押すと消えます'; setTimeout(function () { b.dataset.sure = ''; b.textContent = 'この記録を消す'; }, 4000); return; }
     doSave([], '消しています…');
   });
+
+  // ---- 今日の栄養 ----
+  function fmtv(v, unit) {
+    var d = v >= 100 ? 0 : v >= 10 ? 1 : 2;
+    return Number(v).toFixed(d).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1') + '<span class=ref> ' + esc(unit) + '</span>';
+  }
+  function openNu() {
+    $('nu').style.display = 'block'; $('nubody').innerHTML = '<div class="card wait">計算しています…</div>';
+    api('nutri').then(function (r) {
+      $('nutitle').textContent = r.date.slice(5).replace('/', '月') + '日の栄養';
+      var p = r.pfc, h = '<div class=card><div class=of>エネルギー</div><div><span style="font-size:26px;font-weight:bold">' + num(r.kcal) + '</span> <span class=of>/ ' + num(r.target) + ' kcal</span></div>'
+        + '<div class=lbl style="margin-top:12px">PFCバランス（目標：たんぱく質13〜20%・脂質20〜30%・炭水化物50〜65%）</div>'
+        + '<div class=pfc><div style="width:' + p.prot + '%;background:#2e7d4f">P ' + Math.round(p.prot) + '%</div><div style="width:' + p.fat + '%;background:#d28b26">F ' + Math.round(p.fat) + '%</div><div style="width:' + p.carb + '%;background:#4f7fbf">C ' + Math.round(p.carb) + '%</div></div></div>';
+      h += '<div class=card><table class=nt>';
+      r.rows.forEach(function (x) {
+        var cls = x.status === 'ちょうど' ? 'ok' : x.status === '多い' ? 'hi' : 'lo';
+        var bar = x.ratio != null ? '<div class=mb><i style="width:' + Math.min(100, x.ratio * 100) + '%;background:' + (cls === 'ok' ? '#2e7d4f' : cls === 'hi' ? '#c0392b' : '#d28b26') + '"></i></div>' : '';
+        h += '<tr><td>' + esc(x.name) + '<div class=ref>' + esc(x.kind) + '：' + esc(x.ref) + '</div>' + bar + '</td>'
+          + '<td class=v>' + fmtv(x.value, x.unit) + (x.pe != null ? '<div class=ref>' + x.pe + '%エネルギー</div>' : '') + '</td>'
+          + '<td style="text-align:right"><span class="st ' + cls + '">' + esc(x.status) + '</span></td></tr>';
+      });
+      h += '</table></div>';
+      h += '<div class=card><b>フィトケミカル（含まれる主なもの）</b><div style="margin-top:4px">'
+        + (r.phyto.length ? r.phyto.map(function (x) { return '<span class=chip>' + esc(x.name) + '<span class=ref>（' + x.from.map(esc).join('・') + '）</span></span>'; }).join('') : '<span class=wait>今日の記録からは見つかりませんでした</span>')
+        + '</div><div class=hint style="margin-top:8px">フィトケミカルは公式の成分表に載っていないため、名前だけを出しています（量は出していません）。</div></div>';
+      h += '<p class=hint>材料のうち成分表に当てはめられた割合：カロリーで' + r.coverage + '%（「しょうゆ・砂糖」のようにまとめた調味料などは、栄養素の計算に入っていません）。<br>出典：' + esc(r.source) + '。<br>量が違うと栄養素もずれます。記録を直すと計算し直されます。医師・栄養指導の指示があればそちらを優先してください。</p>';
+      $('nubody').innerHTML = h;
+    }).catch(function (e) { $('nubody').innerHTML = '<div class="card ng">計算できませんでした（' + esc(e.message) + '）</div>'; });
+  }
+  $('nubtn').addEventListener('click', openNu);
+  $('nuclose').addEventListener('click', function () { $('nu').style.display = 'none'; });
 
   loadDay();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
