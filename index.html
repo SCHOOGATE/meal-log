@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>食事の記録</title>
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#2e7d4f">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="食事の記録">
+<style>
+  :root{--bg:#f5f7f5;--fg:#222;--card:#fff;--sub:#5b6460;--green:#2e7d4f;--green2:#1f5a38;--red:#c0392b;--line:#d5dbd7}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;margin:0 auto;padding:16px;background:var(--bg);color:var(--fg);max-width:560px}
+  h1{font-size:20px;margin:4px 0 12px}
+  .card{background:var(--card);border-radius:14px;padding:14px;margin-top:12px;font-size:15px;line-height:1.6;box-shadow:0 1px 3px rgba(0,0,0,.08);word-break:break-word}
+  #sum .big{font-size:30px;font-weight:bold;font-variant-numeric:tabular-nums}
+  #sum .of{font-size:15px;color:var(--sub)}
+  .bar{height:10px;border-radius:5px;background:#e4e9e6;overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;background:var(--green);width:0}
+  .bar.over i{background:var(--red)}
+  .btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:26px 0;font-size:22px;font-weight:bold;border:0;border-radius:18px;background:var(--green);color:#fff;margin-top:14px;font-family:inherit;cursor:pointer}
+  .btn.voice{background:#fff;color:#9aa39e;border:2px dashed #c7cec9;font-size:18px;padding:18px 0}
+  .row{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:14px;color:var(--sub)}
+  .row select{flex:1;padding:10px;font-size:16px;border:1px solid var(--line);border-radius:10px;background:#fff;color:#222}
+  a.lib{display:block;text-align:center;margin-top:10px;font-size:15px;color:var(--green2)}
+  input[type=file]{display:none}
+  .ok{color:var(--green2);font-weight:bold}.ng{color:var(--red);font-weight:bold}.wait{color:#888}
+  .res img{width:100%;border-radius:10px;margin:6px 0;display:block}
+  .res table{width:100%;border-collapse:collapse;font-size:14px}
+  .res td{border-top:1px solid #eef1ef;padding:6px 4px;vertical-align:top}
+  .res td.k{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .res .ing{color:var(--sub);font-size:13px}
+  .note{font-size:13px;color:#8a5a00;background:#fff6e0;border-radius:8px;padding:6px 8px;margin-top:6px}
+  .hint{font-size:12px;color:#7a837e;margin:14px 4px 0;line-height:1.6}
+  #setup{display:none}
+</style>
+</head>
+<body>
+<h1>食事の記録</h1>
+
+<div id="setup" class="card"><span class="ng">設定がまだです。</span><br>「自分専用のリンク」を、このスマホの Chrome で一度開いてください。</div>
+
+<div id="app">
+  <div id="sum" class="card">
+    <div class="of" id="sumday">今日</div>
+    <div><span class="big" id="sumk">—</span> <span class="of">/ <span id="sumt">1,800</span> kcal</span></div>
+    <div class="bar" id="bar"><i></i></div>
+    <div class="of" id="sumleft"></div>
+  </div>
+
+  <label class="btn" for="cam">📷 写真で記録</label>
+  <input id="cam" type="file" accept="image/*" capture="environment">
+  <a class="lib" href="#" id="libbtn">撮った写真から選ぶ（複数可）</a>
+  <input id="lib" type="file" accept="image/*" multiple>
+
+  <button class="btn voice" type="button" disabled>🎤 音声で記録（次の段階で使えるようにします）</button>
+
+  <div class="row">区分
+    <select id="meal">
+      <option>自動</option><option>朝食</option><option>昼食</option><option>夕食</option><option>間食</option>
+    </select>
+  </div>
+
+  <div id="list"></div>
+  <p class="hint">分量とカロリーは写真の見た目から出した目安です。医師・栄養指導の値があればそちらを優先してください。<br>記録はご自身の Google ドライブ「栄養管理アプリ」フォルダのシートだけに入ります。</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  var VERSION = 'nutrition-web v0.1';
+  var KEY = 'nutri_cfg';
+
+  function $(i) { return document.getElementById(i); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+  function num(n) { return Math.round(n).toLocaleString('ja-JP'); }
+
+  // ---- 自分専用リンク（#u=デプロイID&t=合言葉）を一度開くと、このスマホに覚える ----
+  var cfg = null;
+  (function () {
+    var h = location.hash.replace(/^#/, ''), p = {};
+    h.split('&').forEach(function (kv) { var a = kv.split('='); if (a[0]) p[a[0]] = decodeURIComponent(a[1] || ''); });
+    if (/^[A-Za-z0-9_-]{20,}$/.test(p.u || '') && /^[A-Za-z0-9]{16,}$/.test(p.t || '')) {
+      store(KEY, JSON.stringify({ u: p.u, t: p.t }));
+      history.replaceState(null, '', location.pathname);   // 合言葉をアドレス欄に残さない
+    }
+    try { cfg = JSON.parse(store(KEY) || 'null'); } catch (e) { cfg = null; }
+  })();
+  if (!cfg) { $('setup').style.display = 'block'; $('app').style.display = 'none'; return; }
+  var API = 'https://script.google.com/macros/s/' + cfg.u + '/exec';
+
+  function api(action, body) {
+    body = body || {}; body.t = cfg.t; body.action = action;
+    return fetch(API, { method: 'POST', body: JSON.stringify(body), redirect: 'follow' })
+      .then(function (r) { if (!r.ok) throw new Error('通信エラー ' + r.status); return r.json(); })
+      .then(function (j) { if (!j.ok) throw new Error(j.error || '失敗'); return j.data; });
+  }
+  function card(html) { var d = document.createElement('div'); d.className = 'card res'; d.innerHTML = html; var L = $('list'); L.insertBefore(d, L.firstChild); return d; }
+
+  function showSum(t) {
+    if (!t) return;
+    $('sumday').textContent = '今日（' + t.date.slice(5).replace('/', '月') + '日）の合計';
+    $('sumk').textContent = num(t.total);
+    $('sumt').textContent = num(t.target);
+    var r = t.target ? t.total / t.target : 0;
+    $('bar').className = 'bar' + (r > 1 ? ' over' : '');
+    $('bar').firstChild.style.width = Math.min(100, r * 100) + '%';
+    var left = t.target - t.total;
+    $('sumleft').textContent = left >= 0 ? 'あと ' + num(left) + ' kcal' : '目安より ' + num(-left) + ' kcal 多め';
+  }
+  api('today').then(showSum).catch(function (e) { card('<span class=ng>つながりません（' + esc(e.message) + '）。電波を確かめて開き直してください</span>'); });
+
+  // ---- 写真：縮めて送る → 読み取り結果の範囲で切り抜いて送る ----
+  function loadImg(file) {
+    return new Promise(function (ok, ng) {
+      var u = URL.createObjectURL(file), im = new Image();
+      im.onload = function () { ok(im); }; im.onerror = function () { ng(new Error('写真を開けませんでした')); }; im.src = u;
+    });
+  }
+  function toJpeg(src, sx, sy, sw, sh, max, q) {
+    var s = Math.min(1, max / Math.max(sw, sh));
+    var c = document.createElement('canvas'); c.width = Math.round(sw * s); c.height = Math.round(sh * s);
+    c.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', q).split(',')[1];
+  }
+  function cropB64(im, box) {
+    var W = im.naturalWidth, H = im.naturalHeight;
+    var b = (box && box.length === 4) ? box : [0, 0, 1000, 1000];
+    var pad = 20;  // 少しだけ余白（端が切れないように）
+    var y0 = Math.max(0, b[0] - pad), x0 = Math.max(0, b[1] - pad), y1 = Math.min(1000, b[2] + pad), x1 = Math.min(1000, b[3] + pad);
+    if (y1 - y0 < 50 || x1 - x0 < 50) { y0 = 0; x0 = 0; y1 = 1000; x1 = 1000; }
+    var sx = W * x0 / 1000, sy = H * y0 / 1000, sw = W * (x1 - x0) / 1000, sh = H * (y1 - y0) / 1000;
+    return toJpeg(im, sx, sy, sw, sh, 480, 0.82);
+  }
+
+  function resultHtml(r, cropUrl) {
+    var h = '<div class=ok>' + esc(r.meal) + '（' + esc(r.date.slice(5)) + ' ' + esc(r.time) + '）を記録しました　' + num(r.total) + ' kcal</div>';
+    if (cropUrl) h += '<img src="' + cropUrl + '" alt="料理の写真">';
+    h += '<table>';
+    r.dishes.forEach(function (d) {
+      var ing = (d.ings || []).map(function (x) { return esc(x.name) + ' ' + esc(x.amount); }).join('、');
+      h += '<tr><td>' + esc(d.name) + '<div class=ing>' + ing + '</div></td><td class=k>' + num(d.kcal) + ' kcal</td></tr>';
+    });
+    h += '</table>';
+    if (r.note) h += '<div class=note>📝 ' + esc(r.note) + '</div>';
+    return h;
+  }
+
+  function send(file) {
+    var d = card('<span class=wait>写真を読み取っています…（10〜20秒）</span>');
+    var im;
+    return loadImg(file).then(function (x) {
+      im = x;
+      var b64 = toJpeg(im, 0, 0, im.naturalWidth, im.naturalHeight, 1600, 0.85);
+      return api('photo', { b64: b64, ts: file.lastModified || Date.now(), meal: $('meal').value });
+    }).then(function (r) {
+      if (!r.isFood) { d.innerHTML = '<span class=ng>料理が見つかりませんでした</span><div class=note>' + esc(r.note) + '</div>'; return; }
+      var c = cropB64(im, r.crop);
+      d.innerHTML = resultHtml(r, 'data:image/jpeg;base64,' + c) + '<div class=wait id="w' + r.id + '">シートに写真を貼っています…</div>';
+      showSum(r.today);
+      return api('crop', { id: r.id, b64: c }).then(function () {
+        var w = document.getElementById('w' + r.id); if (w) { w.className = 'ok'; w.textContent = 'シートに写真も貼りました'; }
+      });
+    }).catch(function (e) {
+      d.innerHTML = '<span class=ng>うまくいきませんでした（' + esc(e.message) + '）。もう一度お試しください</span>';
+    });
+  }
+
+  function pick(ev) {
+    var fs = Array.prototype.slice.call(ev.target.files || []);
+    ev.target.value = '';
+    // 1枚ずつ順に送る（同時に送ると記録の順番が入れ替わる）
+    fs.reduce(function (p, f) { return p.then(function () { return send(f); }); }, Promise.resolve());
+  }
+  $('cam').addEventListener('change', pick);
+  $('lib').addEventListener('change', pick);
+  $('libbtn').addEventListener('click', function (e) { e.preventDefault(); $('lib').click(); });
+
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
+  window.NUTRI_VERSION = VERSION;
+})();
+</script>
+</body>
+</html>
