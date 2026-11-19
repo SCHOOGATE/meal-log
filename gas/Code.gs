@@ -12,7 +12,8 @@
 //   ・kcal も成分表の値で計算し直す（当てはめられなかった材料だけ Gemini の推定）
 //   ・比べる基準は 日本人の食事摂取基準（2025年版）男性30〜49歳（厚生労働省の報告書の表から 11/19 読み取り）
 //   ・フィトケミカルは成分表に無いので、料理ごとに「含まれる主なもの」の名前だけ（量は出さない）
-var VERSION = 'nutrition-app v0.3';
+// v0.4 2026-11-19 ドテラのサプリ（公式ページの栄養成分表示・ラベル写真からの登録）を栄養に足す。耐容上限量（2025年版・男性30〜49歳）で上限超えを出す
+var VERSION = 'nutrition-app v0.4';
 var MAP_MODEL = 'gemini-2.5-flash';       // 当てはめ用（考えない設定。11/19 試験で23品すべて正しい番号）
 var SH_FOOD = '成分表';
 var NUT_KEYS = ['kcal', 'prot', 'fat', 'carb', 'fib', 'salt', 'k', 'ca', 'mg', 'fe', 'zn', 'va', 'vd', 've', 'b1', 'b2', 'b6', 'b12', 'fol', 'vc'];
@@ -24,18 +25,18 @@ var DRI = {
   fib:  { name: '食物繊維', unit: 'g', min: 22, kind: '目標量' },
   salt: { name: '食塩相当量', unit: 'g', max: 7.5, kind: '目標量' },
   k:    { name: 'カリウム', unit: 'mg', min: 3000, kind: '目標量' },
-  ca:   { name: 'カルシウム', unit: 'mg', min: 750, kind: '推奨量' },
+  ca:   { name: 'カルシウム', unit: 'mg', min: 750, kind: '推奨量', ul: 2500 },
   mg:   { name: 'マグネシウム', unit: 'mg', min: 380, kind: '推奨量' },
   fe:   { name: '鉄', unit: 'mg', min: 7.5, kind: '推奨量' },
-  zn:   { name: '亜鉛', unit: 'mg', min: 9.5, kind: '推奨量' },
-  va:   { name: 'ビタミンA', unit: 'µgRAE', min: 900, kind: '推奨量' },
-  vd:   { name: 'ビタミンD', unit: 'µg', min: 9.0, kind: '目安量' },
-  ve:   { name: 'ビタミンE', unit: 'mg', min: 6.5, kind: '目安量' },
+  zn:   { name: '亜鉛', unit: 'mg', min: 9.5, kind: '推奨量', ul: 45 },
+  va:   { name: 'ビタミンA', unit: 'µgRAE', min: 900, kind: '推奨量', ul: 2700 },
+  vd:   { name: 'ビタミンD', unit: 'µg', min: 9.0, kind: '目安量', ul: 100 },
+  ve:   { name: 'ビタミンE', unit: 'mg', min: 6.5, kind: '目安量', ul: 800 },
   b1:   { name: 'ビタミンB1', unit: 'mg', min: 1.2, kind: '推奨量' },
   b2:   { name: 'ビタミンB2', unit: 'mg', min: 1.7, kind: '推奨量' },
-  b6:   { name: 'ビタミンB6', unit: 'mg', min: 1.5, kind: '推奨量' },
+  b6:   { name: 'ビタミンB6', unit: 'mg', min: 1.5, kind: '推奨量', ul: 60 },
   b12:  { name: 'ビタミンB12', unit: 'µg', min: 4.0, kind: '目安量' },
-  fol:  { name: '葉酸', unit: 'µg', min: 240, kind: '推奨量' },
+  fol:  { name: '葉酸', unit: 'µg', min: 240, kind: '推奨量', ul: 1000 },
   vc:   { name: 'ビタミンC', unit: 'mg', min: 100, kind: '推奨量' }
 };
 var ROOT_NAME = '栄養管理アプリ';
@@ -73,6 +74,9 @@ function doPost(e) {
     else if (q.action === 'estimate') data = estimate_(q);
     else if (q.action === 'learn') data = learn_(q.text);
     else if (q.action === 'nutri') data = nutri_(q.date);
+    else if (q.action === 'sup') data = supDay_(q.date);
+    else if (q.action === 'supsave') data = supSave_(q);
+    else if (q.action === 'suplabel') data = supLabel_(q);
     else throw new Error('不明な操作です');
     out = { ok: true, data: data };
   } catch (err) {
@@ -352,6 +356,110 @@ function mapDishes_(dishes) {
   return dishes;
 }
 
+// ---------- サプリ（v0.4） ----------
+// シート「サプリ」：1単位（1粒・1本・1mL）あたりの値。公式ページの栄養成分表示から（無いものは空＝量だけ記録）
+// シート「サプリ記録」：日付・サプリID・名前・量・単位・登録日時（その日の分は保存のたびに入れ替える）
+var SH_SUP = 'サプリ', SH_SUPLOG = 'サプリ記録';
+function supMaster_() {
+  var sh = book_().getSheetByName(SH_SUP);
+  if (!sh) return { list: [], head: [], sh: null };
+  var v = sh.getDataRange().getValues(), head = v[0].map(String);
+  var list = v.slice(1).filter(function (r) { return r[0]; }).map(function (r, i) {
+    var o = { row: i + 2 };
+    head.forEach(function (h, j) { o[h] = r[j]; });
+    o.id = String(o.id); o.name = String(o.name); o.unit = String(o.unit); o['default'] = Number(o['default']) || 1;
+    NUT_KEYS.forEach(function (k) { o[k] = (o[k] === '' || o[k] == null) ? null : Number(o[k]); });
+    try { o.extra = o.extra ? JSON.parse(o.extra) : {}; } catch (e) { o.extra = {}; }
+    o.mine = String(o.mine || '') !== '';
+    return o;
+  });
+  return { list: list, head: head, sh: sh };
+}
+function supLogs_(date) {
+  var sh = book_().getSheetByName(SH_SUPLOG);
+  if (!sh || sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues().map(function (r, i) {
+    var d = r[0] instanceof Date ? fmt_(r[0], 'yyyy/MM/dd') : String(r[0]);
+    return { row: i + 2, date: d, id: String(r[1]), name: String(r[2]), amount: Number(r[3]) || 0, unit: String(r[4]) };
+  }).filter(function (x) { return !date || x.date === date; });
+}
+function supDay_(date) {
+  date = String(date || fmt_(new Date(), 'yyyy/MM/dd'));
+  var M = supMaster_();
+  return { date: date, list: M.list.map(function (o) {
+    return { id: o.id, name: o.name, unit: o.unit, def: o['default'], label: String(o.label || ''), source: String(o.source || ''), mine: o.mine,
+             has: NUT_KEYS.filter(function (k) { return o[k] != null; }).length + Object.keys(o.extra).length };
+  }), logs: supLogs_(date) };
+}
+// q = { date, items:[{id, amount}], mine:[id…] }
+function supSave_(q) {
+  var date = String(q.date || fmt_(new Date(), 'yyyy/MM/dd'));
+  var M = supMaster_(), by = {};
+  M.list.forEach(function (o) { by[o.id] = o; });
+  if (q.mine && M.sh) {
+    var col = M.head.indexOf('mine') + 1, set = {};
+    q.mine.forEach(function (id) { set[id] = 1; });
+    M.list.forEach(function (o) { M.sh.getRange(o.row, col).setValue(set[o.id] ? '○' : ''); });
+  }
+  var sh = book_().getSheetByName(SH_SUPLOG);
+  var old = supLogs_(date).map(function (x) { return x.row; }).sort(function (a, b) { return b - a; });
+  old.forEach(function (r) { sh.deleteRow(r); });
+  var at = fmt_(new Date(), 'yyyy/MM/dd HH:mm');
+  var rows = (q.items || []).filter(function (x) { return by[x.id] && Number(x.amount) > 0; })
+    .map(function (x) { var o = by[x.id]; return [date, o.id, o.name, Number(x.amount), o.unit, at]; });
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
+  return { saved: rows.length };
+}
+// ラベル（栄養成分表示）の写真 → 1単位あたりの値をサプリ表に書く。q = { id, b64 }
+function supLabel_(q) {
+  var M = supMaster_(), o = null;
+  M.list.forEach(function (x) { if (x.id === String(q.id)) o = x; });
+  if (!o) throw new Error('サプリが見つかりません');
+  var props = {}; NUT_KEYS.forEach(function (k) { props[k] = { type: 'NUMBER' }; });
+  var schema = { type: 'OBJECT', properties: {
+    found: { type: 'BOOLEAN' }, per_amount: { type: 'NUMBER' }, per_unit: { type: 'STRING' }, values: { type: 'OBJECT', properties: props },
+    others: { type: 'ARRAY', items: { type: 'OBJECT', properties: { name: { type: 'STRING' }, value: { type: 'NUMBER' }, unit: { type: 'STRING' } }, required: ['name', 'value', 'unit'] } },
+    text: { type: 'STRING' } }, required: ['found', 'per_amount', 'per_unit', 'values', 'others', 'text'] };
+  var prompt = [
+    'これはサプリメント「' + o.name + '」のラベルの写真です。「栄養成分表示」の枠の中に書かれている値だけを、そのまま読み取ってください。',
+    '・表示が何あたりか（例：大さじ1杯15mLあたり→ per_amount=15, per_unit="mL"／4粒あたり→ 4, "粒"）',
+    '・values のキー：kcal=エネルギー(kcal), prot=たんぱく質(g), fat=脂質(g), carb=炭水化物(g), fib=食物繊維(g), salt=食塩相当量(g), k=カリウム(mg), ca=カルシウム(mg), mg=マグネシウム(mg), fe=鉄(mg), zn=亜鉛(mg), va=ビタミンA(µg), vd=ビタミンD(µg), ve=ビタミンE(mg), b1,b2,b6=mg, b12=µg, fol=葉酸(µg), vc=ビタミンC(mg)。単位が違えば換算する。ナトリウムだけなら食塩相当量＝ナトリウム(mg)×2.54÷1000',
+    '・それ以外の成分（例：ケイ素、亜鉛以外の微量元素、DHA）は others に名前・値・単位で',
+    '・表示に無い値は入れない（推測しない）。栄養成分表示が写っていなければ found=false',
+    '・text には読み取った表示の文字をそのまま書く'
+  ].join('\n');
+  var r = gemini_([{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: q.b64 } }], schema, { temp: 0 });
+  useLog_('ラベル', r._usage);
+  if (!r.found) return { ok: false, text: r.text || '' };
+  var unitMatch = String(r.per_unit || '').indexOf(o.unit) >= 0 || (o.unit === 'mL' && /ml|ｍｌ|ミリ/i.test(r.per_unit));
+  if (!unitMatch) return { ok: false, text: r.text, error: '表示の単位（' + r.per_unit + '）がこのサプリの単位（' + o.unit + '）と違います。量の単位を確かめてください' };
+  var per = Number(r.per_amount) || 1;
+  NUT_KEYS.forEach(function (k) {
+    var v = r.values && r.values[k];
+    var col = M.head.indexOf(k) + 1;
+    if (col > 0) M.sh.getRange(o.row, col).setValue(v != null && v !== '' ? Math.round(Number(v) / per * 1e6) / 1e6 : '');
+  });
+  var ex = {};
+  (r.others || []).forEach(function (x) { ex[x.name + '(' + x.unit + ')'] = Math.round(Number(x.value) / per * 1e6) / 1e6; });
+  M.sh.getRange(o.row, M.head.indexOf('extra') + 1).setValue(Object.keys(ex).length ? JSON.stringify(ex) : '');
+  M.sh.getRange(o.row, M.head.indexOf('label') + 1).setValue('ラベル写真');
+  M.sh.getRange(o.row, M.head.indexOf('source') + 1).setValue('ボトルのラベルの写真から読み取り（' + fmt_(new Date(), 'yyyy-MM-dd') + '）：' + String(r.text || '').slice(0, 400));
+  return { ok: true, text: r.text, per: per + r.per_unit };
+}
+// その日のサプリの合計（栄養の画面用）
+function supTotals_(date) {
+  var M = supMaster_(), by = {}, tot = {}, extra = {}, items = [];
+  M.list.forEach(function (o) { by[o.id] = o; });
+  NUT_KEYS.forEach(function (k) { tot[k] = 0; });
+  supLogs_(date).forEach(function (x) {
+    var o = by[x.id]; if (!o) return;
+    NUT_KEYS.forEach(function (k) { if (o[k] != null) tot[k] += o[k] * x.amount; });
+    Object.keys(o.extra).forEach(function (k) { extra[k] = (extra[k] || 0) + o.extra[k] * x.amount; });
+    items.push({ name: o.name, amount: x.amount, unit: o.unit, noLabel: NUT_KEYS.every(function (k) { return o[k] == null; }) && !Object.keys(o.extra).length });
+  });
+  return { tot: tot, extra: extra, items: items };
+}
+
 // ---------- その日の栄養 ----------
 function nutri_(date) {
   var D = day_(date), F = foods_();
@@ -374,23 +482,32 @@ function nutri_(date) {
     });
     byMeal[rec.meal] = (byMeal[rec.meal] || 0) + rec.total;
   });
+  // サプリを足す（食事の分は food に残す）
+  var S = supTotals_(D.date), food = {};
+  NUT_KEYS.forEach(function (k) { food[k] = tot[k]; tot[k] += S.tot[k]; });
   var e = tot.kcal || 1;
   var pfc = { prot: tot.prot * 4 / e * 100, fat: tot.fat * 9 / e * 100, carb: tot.carb * 4 / e * 100 };
   var rows = Object.keys(DRI).map(function (k) {
-    var g = DRI[k], v = tot[k], st = '', ref = '';
+    var g = DRI[k], v = tot[k], st = '', ref = '', base = { key: k, name: g.name, unit: g.unit, value: v, food: food[k], sup: S.tot[k], kind: g.kind };
     if (g.pe) {
       var pe = pfc[k]; ref = g.pe[0] + '〜' + g.pe[1] + '%エネルギー';
       st = pe < g.pe[0] ? '少ない' : pe > g.pe[1] ? '多い' : 'ちょうど';
       if (k === 'prot' && v < g.min) st = '少ない';
       if (k === 'prot') ref = g.min + 'g以上・' + ref;
-      return { key: k, name: g.name, unit: g.unit, value: v, pe: Math.round(pe), ref: ref, kind: g.kind, status: st, ratio: g.min ? v / g.min : null };
+      base.pe = Math.round(pe); base.ref = ref; base.status = st; base.ratio = g.min ? v / g.min : null; return base;
     }
-    if (g.max != null) { ref = g.max + g.unit + '未満'; st = v < g.max ? 'ちょうど' : '多い'; return { key: k, name: g.name, unit: g.unit, value: v, ref: ref, kind: g.kind, status: st, ratio: v / g.max }; }
+    if (g.max != null) { base.ref = g.max + g.unit + '未満'; base.status = v < g.max ? 'ちょうど' : '多い'; base.ratio = v / g.max; return base; }
     ref = g.min + g.unit + (g.kind === '目標量' ? '以上' : '');
     st = v >= g.min ? 'ちょうど' : v >= g.min * 0.7 ? 'やや少ない' : '少ない';
-    return { key: k, name: g.name, unit: g.unit, value: v, ref: ref, kind: g.kind, status: st, ratio: v / g.min };
+    // 耐容上限量（葉酸はサプリ由来の分だけで比べる）
+    if (g.ul != null) {
+      var uv = k === 'fol' ? S.tot[k] : v;
+      ref += '・上限' + g.ul + g.unit + (k === 'fol' ? '（サプリ分）' : '');
+      if (uv > g.ul) st = '上限超え';
+    }
+    base.ref = ref; base.status = st; base.ratio = v / g.min; return base;
   });
-  return { date: D.date, kcal: Math.round(tot.kcal), target: D.today.target, rows: rows, pfc: pfc,
+  return { date: D.date, kcal: Math.round(tot.kcal), target: D.today.target, rows: rows, pfc: pfc, sup: S,
            coverage: all ? Math.round(mapped / all * 100) : 0, byMeal: byMeal,
            phyto: Object.keys(phyto).map(function (s) { return { name: s, from: phyto[s].filter(function (v, i, a) { return a.indexOf(v) === i; }) }; }),
            source: '日本食品標準成分表（八訂）増補2023年／日本人の食事摂取基準（2025年版）男性30〜49歳' };
