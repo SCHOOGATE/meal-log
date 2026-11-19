@@ -7,7 +7,37 @@
 // 公開設定：実行＝自分／アクセス＝全員（外の画面から送るため）。本人以外は合言葉（t）で弾く
 // 個人の健康データ。外向けのコンテンツに流用しない
 
-var VERSION = 'nutrition-app v0.2';
+// v0.3 2026-11-19 栄養素の分析：日本食品標準成分表（八訂）増補2023年（文部科学省・2026-03-27更新版）の値 × 食べたグラム
+//   ・材料 → 成分表の食品番号の当てはめは Gemini（成分表の一覧 約5万トークンを先頭に置く＝続けて呼ぶと暗黙キャッシュで割引）
+//   ・kcal も成分表の値で計算し直す（当てはめられなかった材料だけ Gemini の推定）
+//   ・比べる基準は 日本人の食事摂取基準（2025年版）男性30〜49歳（厚生労働省の報告書の表から 11/19 読み取り）
+//   ・フィトケミカルは成分表に無いので、料理ごとに「含まれる主なもの」の名前だけ（量は出さない）
+var VERSION = 'nutrition-app v0.3';
+var MAP_MODEL = 'gemini-2.5-flash';       // 当てはめ用（考えない設定。11/19 試験で23品すべて正しい番号）
+var SH_FOOD = '成分表';
+var NUT_KEYS = ['kcal', 'prot', 'fat', 'carb', 'fib', 'salt', 'k', 'ca', 'mg', 'fe', 'zn', 'va', 'vd', 've', 'b1', 'b2', 'b6', 'b12', 'fol', 'vc'];
+// 日本人の食事摂取基準（2025年版）男性30〜49歳。kind: 推奨量/目安量/目標量。min 以上・max 未満が望ましい
+var DRI = {
+  prot: { name: 'たんぱく質', unit: 'g', min: 65, kind: '推奨量', pe: [13, 20] },
+  fat:  { name: '脂質', unit: 'g', kind: '目標量', pe: [20, 30] },
+  carb: { name: '炭水化物', unit: 'g', kind: '目標量', pe: [50, 65] },
+  fib:  { name: '食物繊維', unit: 'g', min: 22, kind: '目標量' },
+  salt: { name: '食塩相当量', unit: 'g', max: 7.5, kind: '目標量' },
+  k:    { name: 'カリウム', unit: 'mg', min: 3000, kind: '目標量' },
+  ca:   { name: 'カルシウム', unit: 'mg', min: 750, kind: '推奨量' },
+  mg:   { name: 'マグネシウム', unit: 'mg', min: 380, kind: '推奨量' },
+  fe:   { name: '鉄', unit: 'mg', min: 7.5, kind: '推奨量' },
+  zn:   { name: '亜鉛', unit: 'mg', min: 9.5, kind: '推奨量' },
+  va:   { name: 'ビタミンA', unit: 'µgRAE', min: 900, kind: '推奨量' },
+  vd:   { name: 'ビタミンD', unit: 'µg', min: 9.0, kind: '目安量' },
+  ve:   { name: 'ビタミンE', unit: 'mg', min: 6.5, kind: '目安量' },
+  b1:   { name: 'ビタミンB1', unit: 'mg', min: 1.2, kind: '推奨量' },
+  b2:   { name: 'ビタミンB2', unit: 'mg', min: 1.7, kind: '推奨量' },
+  b6:   { name: 'ビタミンB6', unit: 'mg', min: 1.5, kind: '推奨量' },
+  b12:  { name: 'ビタミンB12', unit: 'µg', min: 4.0, kind: '目安量' },
+  fol:  { name: '葉酸', unit: 'µg', min: 240, kind: '推奨量' },
+  vc:   { name: 'ビタミンC', unit: 'mg', min: 100, kind: '推奨量' }
+};
 var ROOT_NAME = '栄養管理アプリ';
 var BOOK_NAME = '栄養管理_記録';
 var GEMINI_MODEL = 'gemini-2.5-flash';
@@ -42,6 +72,7 @@ function doPost(e) {
     else if (q.action === 'save') data = save_(q);
     else if (q.action === 'estimate') data = estimate_(q);
     else if (q.action === 'learn') data = learn_(q.text);
+    else if (q.action === 'nutri') data = nutri_(q.date);
     else throw new Error('不明な操作です');
     out = { ok: true, data: data };
   } catch (err) {
@@ -79,10 +110,13 @@ function dow_(d) { return DOW[Number(fmt_(d, 'u')) % 7]; }
 function normDish_(d) {
   var ings = (d.ingredients || d.ings || []).map(function (x) {
     var g = Number(x.grams) || 0, k = Math.round(Number(x.kcal) || 0);
-    return { name: String(x.name || ''), amount: String(x.amount || ''), grams: g, kcal: k,
-             g0: Number(x.g0) || g, k0: x.k0 != null ? Number(x.k0) : k };
+    var o = { name: String(x.name || ''), amount: String(x.amount || ''), grams: g, kcal: k,
+              g0: Number(x.g0) || g, k0: x.k0 != null ? Number(x.k0) : k };
+    if (x.c) { o.c = String(x.c); o.fn = String(x.fn || ''); }   // 成分表の食品番号と食品名
+    return o;
   });
-  return { name: String(d.name || ''), shared: !!d.shared, portion: Number(d.portion) || 1, ings: ings };
+  var phyto = (d.phyto || []).map(String).filter(String).slice(0, 4);
+  return { name: String(d.name || ''), shared: !!d.shared, portion: Number(d.portion) || 1, ings: ings, phyto: phyto };
 }
 function dishKcal_(d) {
   var s = d.ings.reduce(function (a, x) { return a + (Number(x.kcal) || 0); }, 0);
@@ -126,7 +160,7 @@ function photo_(q) {
   if (!r.is_food) return { id: id, isFood: false, note: r.note || '料理が写っていないようです' };
 
   var meal = (q.meal && q.meal !== '自動') ? q.meal : mealOf_(when);
-  var dishes = (r.dishes || []).map(normDish_);
+  var dishes = mapDishes_((r.dishes || []).map(normDish_));
   var base = { date: fmt_(when, 'yyyy/MM/dd'), dow: dow_(when), meal: meal, time: fmt_(when, 'HH:mm'), id: id, at: fmt_(new Date(), 'yyyy/MM/dd HH:mm') };
   var sh = book_().getSheetByName(SH_LOG);
   ensureDataCol_(sh);
@@ -161,6 +195,9 @@ var PROMPT = [
   '・肉・魚・芋は1切れ・1個ずつの大きさから合計を出す',
   '・amount は家庭で分かる単位（180g、1個、2枚、1切れ（約30g）など）。grams はそのグラム数の推定値（飲み物はmlをそのままgとしてよい）。少々・適量のときも grams に推定値を入れる',
   '・kcal はその材料のカロリー。日本食品標準成分表（八訂）の値を目安に計算する。油・マヨネーズ・ドレッシング・砂糖などカロリーの大きい調味料は、使われていそうなら材料に入れる',
+  '・唐揚げ・コロッケ・餃子・だし巻き卵・切り干し大根の煮物など、料理そのものが成分表に1つの食品として載っているものは、衣・油・調味料に分けず1つの材料にする',
+  '・ingredients の name は、成分表で探しやすい名前にする（例：白米のご飯、鶏もも肉（皮つき・焼き）、ほうれん草（ゆで））',
+  '・phyto: その料理に含まれる代表的なフィトケミカル（植物由来の機能性成分）の名前を、よく知られた確かなものだけ最大3つ（例：納豆→大豆イソフラボン、キムチ→カプサイシン）。動物性の料理や分からなければ空',
   '',
   '【鍋・大皿】',
   '・鍋や大皿を何人かで取り分ける料理は shared を true にし、写っている全体の量で材料と kcal を出す（何人分食べたかは本人が後で選ぶ）',
@@ -175,21 +212,23 @@ var ING_SCHEMA = { type: 'OBJECT', properties: {
   name: { type: 'STRING' }, amount: { type: 'STRING' }, grams: { type: 'NUMBER' }, kcal: { type: 'NUMBER' }
 }, required: ['name', 'amount', 'grams', 'kcal'] };
 var DISH_SCHEMA = { type: 'OBJECT', properties: {
-  name: { type: 'STRING' }, shared: { type: 'BOOLEAN' }, ingredients: { type: 'ARRAY', items: ING_SCHEMA }
-}, required: ['name', 'shared', 'ingredients'] };
+  name: { type: 'STRING' }, shared: { type: 'BOOLEAN' }, ingredients: { type: 'ARRAY', items: ING_SCHEMA },
+  phyto: { type: 'ARRAY', items: { type: 'STRING' } }
+}, required: ['name', 'shared', 'ingredients', 'phyto'] };
 var SCHEMA = { type: 'OBJECT', properties: {
   is_food: { type: 'BOOLEAN' }, dishes: { type: 'ARRAY', items: DISH_SCHEMA },
   crop: { type: 'ARRAY', items: { type: 'INTEGER' } }, note: { type: 'STRING' }
 }, required: ['is_food', 'dishes', 'crop', 'note'] };
 
-function gemini_(parts, schema) {
+function gemini_(parts, schema, opt) {
+  opt = opt || {};
   var key = prop_('GEMINI_API_KEY');
   if (!key) throw new Error('Gemini のキーが未設定です');
   var payload = { contents: [{ parts: parts }],
                   // 考える量の上限 1024：上限なしは1回約2.4円・1024は約1.1円（11/19 実測）
-                  generationConfig: { temperature: 0.2, responseMimeType: 'application/json', responseSchema: schema,
-                                      thinkingConfig: { thinkingBudget: 1024 } } };
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent?key=' + encodeURIComponent(key);
+                  generationConfig: { temperature: opt.temp != null ? opt.temp : 0.2, responseMimeType: 'application/json', responseSchema: schema,
+                                      thinkingConfig: { thinkingBudget: opt.think != null ? opt.think : 1024 } } };
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + (opt.model || GEMINI_MODEL) + ':generateContent?key=' + encodeURIComponent(key);
   var res, code;
   for (var i = 0; i < 2; i++) {
     res = UrlFetchApp.fetch(url, { method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true });
@@ -240,7 +279,121 @@ function estimate_(q) {
   ].join('\n') + learned_();
   var r = gemini_([{ text: prompt }], { type: 'OBJECT', properties: { dishes: { type: 'ARRAY', items: DISH_SCHEMA } }, required: ['dishes'] });
   useLog_('文章', r._usage);
-  return (r.dishes || []).map(normDish_);
+  return mapDishes_((r.dishes || []).map(normDish_));
+}
+
+// ---------- 成分表（シート「成分表」：食品番号・食品名・100gあたりの値） ----------
+var FOODS_ = null;
+function foods_() {
+  if (FOODS_) return FOODS_;
+  var cache = CacheService.getScriptCache(), n = Number(cache.get('foods_n') || 0), txt = '';
+  if (n) {
+    var parts = cache.getAll(Array.apply(null, Array(n)).map(function (_, i) { return 'foods_' + i; }));
+    for (var i = 0; i < n; i++) { if (!parts['foods_' + i]) { txt = ''; break; } txt += parts['foods_' + i]; }
+  }
+  var list;
+  if (txt) list = JSON.parse(txt);
+  else {
+    var sh = book_().getSheetByName(SH_FOOD);
+    if (!sh) return (FOODS_ = { list: [], byCode: {} });
+    var v = sh.getDataRange().getValues(), head = v[0];
+    list = v.slice(1).filter(function (r) { return r[0]; }).map(function (r) {
+      var o = {};
+      head.forEach(function (h, j) { o[h] = (j < 2) ? String(r[j]) : (r[j] === '' ? null : Number(r[j])); });
+      return o;
+    });
+    var s = JSON.stringify(list), CH = 90000, k = Math.ceil(s.length / CH), put = { foods_n: String(k) };
+    for (var c = 0; c < k; c++) put['foods_' + c] = s.slice(c * CH, (c + 1) * CH);
+    try { cache.putAll(put, 21600); } catch (e) { /* 入らなくても動く */ }
+  }
+  var by = {};
+  list.forEach(function (f) { by[f.code] = f; });
+  return (FOODS_ = { list: list, byCode: by });
+}
+
+// 材料に成分表の食品番号を付け、kcal を成分表の値で計算し直す（番号がすでにある材料はそのまま）
+function mapDishes_(dishes) {
+  var F = foods_();
+  if (!F.list.length) return dishes;
+  var todo = [];
+  dishes.forEach(function (d) { d.ings.forEach(function (x) { if (!x.c || !F.byCode[x.c]) todo.push({ d: d, x: x }); }); });
+  if (todo.length) {
+    try {
+      var idx = F.list.map(function (f) { return f.code + ' ' + f.name; }).join('\n');
+      // 一覧を先頭に置く（同じ先頭が続くと暗黙キャッシュで安くなる）
+      // 番号（1. 2. …）で返させると一覧の行とずれた（11/19 実測で8つずれ）→ id と材料名を返させ、照らし合わせてから使う
+      var prompt = '【食品成分表の一覧】（食品番号 食品名）\n' + idx + '\n\n'
+        + '上の一覧から、下の各材料にいちばん近い食品を1つずつ選び、id・材料名・食品番号を返してください。'
+        + '調理した状態（ゆで・焼き・油いため等）や、調理済み食品（から揚げ・コロッケ等）の項目があればそれを優先する。どうしても無ければ食品番号は空文字。\n\n【材料】\n'
+        + todo.map(function (t, i) { return 'm' + (i + 1) + '｜' + t.x.name + '（料理：' + t.d.name + '）'; }).join('\n');
+      var r = gemini_([{ text: prompt }], { type: 'OBJECT', properties: { codes: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+        id: { type: 'STRING' }, name: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['id', 'name', 'code'] } } }, required: ['codes'] },
+        { model: MAP_MODEL, think: 0, temp: 0 });
+      useLog_('当てはめ', r._usage);
+      (r.codes || []).forEach(function (c) {
+        var m = /^m(\d+)$/.exec(String(c.id || '').trim()); if (!m) return;
+        var t = todo[Number(m[1]) - 1]; if (!t) return;
+        var nm = String(c.name || '').split('（')[0];
+        if (!nm || (t.x.name.indexOf(nm) < 0 && nm.indexOf(t.x.name) < 0)) return;   // 名前が合わなければ使わない
+        var f = F.byCode[String(c.code)];
+        if (f) { t.x.c = f.code; t.x.fn = f.name; }
+      });
+    } catch (e) { /* 当てはめに失敗しても記録は止めない（kcal は Gemini の推定のまま） */ }
+  }
+  dishes.forEach(function (d) {
+    d.ings.forEach(function (x) {
+      var f = x.c && F.byCode[x.c];
+      if (f && f.kcal != null && x.g0 > 0) {
+        x.k0 = Math.round(f.kcal * x.g0 / 100);
+        x.kcal = Math.round(f.kcal * x.grams / 100);
+      }
+    });
+  });
+  return dishes;
+}
+
+// ---------- その日の栄養 ----------
+function nutri_(date) {
+  var D = day_(date), F = foods_();
+  var tot = {}, mapped = 0, all = 0, phyto = {};
+  NUT_KEYS.forEach(function (k) { tot[k] = 0; });
+  var byMeal = {};
+  D.records.forEach(function (rec) {
+    rec.dishes.forEach(function (d) {
+      var p = d.shared ? d.portion : 1;
+      (d.phyto || []).forEach(function (s) { (phyto[s] = phyto[s] || []).push(d.name); });
+      d.ings.forEach(function (x) {
+        all += x.kcal * p;
+        var f = x.c && F.byCode[x.c];
+        if (f) {
+          mapped += x.kcal * p;
+          NUT_KEYS.forEach(function (k) { if (k !== 'kcal' && f[k] != null) tot[k] += f[k] * x.grams / 100 * p; });
+        }
+        tot.kcal += x.kcal * p;
+      });
+    });
+    byMeal[rec.meal] = (byMeal[rec.meal] || 0) + rec.total;
+  });
+  var e = tot.kcal || 1;
+  var pfc = { prot: tot.prot * 4 / e * 100, fat: tot.fat * 9 / e * 100, carb: tot.carb * 4 / e * 100 };
+  var rows = Object.keys(DRI).map(function (k) {
+    var g = DRI[k], v = tot[k], st = '', ref = '';
+    if (g.pe) {
+      var pe = pfc[k]; ref = g.pe[0] + '〜' + g.pe[1] + '%エネルギー';
+      st = pe < g.pe[0] ? '少ない' : pe > g.pe[1] ? '多い' : 'ちょうど';
+      if (k === 'prot' && v < g.min) st = '少ない';
+      if (k === 'prot') ref = g.min + 'g以上・' + ref;
+      return { key: k, name: g.name, unit: g.unit, value: v, pe: Math.round(pe), ref: ref, kind: g.kind, status: st, ratio: g.min ? v / g.min : null };
+    }
+    if (g.max != null) { ref = g.max + g.unit + '未満'; st = v < g.max ? 'ちょうど' : '多い'; return { key: k, name: g.name, unit: g.unit, value: v, ref: ref, kind: g.kind, status: st, ratio: v / g.max }; }
+    ref = g.min + g.unit + (g.kind === '目標量' ? '以上' : '');
+    st = v >= g.min ? 'ちょうど' : v >= g.min * 0.7 ? 'やや少ない' : '少ない';
+    return { key: k, name: g.name, unit: g.unit, value: v, ref: ref, kind: g.kind, status: st, ratio: v / g.min };
+  });
+  return { date: D.date, kcal: Math.round(tot.kcal), target: D.today.target, rows: rows, pfc: pfc,
+           coverage: all ? Math.round(mapped / all * 100) : 0, byMeal: byMeal,
+           phyto: Object.keys(phyto).map(function (s) { return { name: s, from: phyto[s].filter(function (v, i, a) { return a.indexOf(v) === i; }) }; }),
+           source: '日本食品標準成分表（八訂）増補2023年／日本人の食事摂取基準（2025年版）男性30〜49歳' };
 }
 
 // ---------- 記録を書き換える（直す画面の「保存」） ----------
@@ -252,6 +405,7 @@ function save_(q) {
   if (!rows.length) throw new Error('記録が見つかりません（' + q.id + '）');
   var first = rows[0], old = rows.length;
   var dishes = (q.dishes || []).map(normDish_).filter(function (d) { return d.name; });
+  if (dishes.length) dishes = mapDishes_(dishes);   // 番号の無い材料だけ当てはめる
   if (!dishes.length) {
     // 全部消した：写真ごと記録を消す
     sh.deleteRows(first, old);
