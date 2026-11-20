@@ -110,7 +110,7 @@
     <div class="bar" id="bar"><i></i></div>
     <div class="of" id="sumleft"></div>
     <div style="display:flex;gap:8px;margin-top:10px">
-      <button class="mini" id="nubtn" type="button" style="flex:1;padding:10px">📊 今日の栄養</button>
+      <button class="mini" id="nubtn" type="button" style="flex:1;padding:10px">📊 栄養</button>
       <button class="mini" id="spbtn" type="button" style="flex:1;padding:10px">💊 サプリ</button>
     </div>
     <button class="mini" id="hsbtn" type="button" style="width:100%;padding:10px;margin-top:8px">📅 これまでの記録</button>
@@ -182,7 +182,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = 'nutrition-web v0.5';
+  var VERSION = 'nutrition-web v0.6';
   var KEY = 'nutri_cfg';
 
   function $(i) { return document.getElementById(i); }
@@ -505,29 +505,45 @@
   }
   function stCls(s) { return s === 'ちょうど' ? 'ok' : (s === '多い' || s === '上限超え') ? 'hi' : 'lo'; }
   function plain(v) { return fmtv(v, '').replace(/<span[^>]*> <\/span>/, ''); }
-  var nuR = null, nuMode = 'with';
+  var nuR = null, nuMode = 'with', nuSpan = 1;
+  var SPANS = [[1, 'この日'], [7, '7日間'], [30, '30日間']];
+  function spanSeg() {
+    return '<div class=seg style="margin-top:8px">' + SPANS.map(function (p) { return '<button data-span="' + p[0] + '" class="' + (nuSpan === p[0] ? 'on' : '') + '">' + p[1] + '</button>'; }).join('') + '</div>';
+  }
   function openNu() {
-    $('nu').style.display = 'block'; $('nubody').innerHTML = '<div class="card wait">計算しています…</div>';
-    api('nutri', { date: viewDate }).then(function (r) {
-      nuR = r; nuMode = 'with';
-      $('nutitle').textContent = r.date.slice(5).replace('/', '月') + '日の栄養';
+    $('nu').style.display = 'block'; $('nubody').innerHTML = spanSeg() + '<div class="card wait">計算しています…</div>';
+    var want = nuSpan;
+    var call = nuSpan === 1 ? api('nutri', { date: viewDate }) : api('nutrirange', { days: nuSpan, to: viewDate });
+    call.then(function (r) {
+      if (want !== nuSpan) return;
+      nuR = r;
+      $('nutitle').textContent = r.range ? jp(r.from).replace(/（.）/, '') + '〜' + jp(r.to).replace(/（.）/, '') : r.date.slice(5).replace('/', '月') + '日の栄養';
       nuRender();
-    }).catch(function (e) { $('nubody').innerHTML = '<div class="card ng">計算できませんでした（' + esc(e.message) + '）</div>'; });
+    }).catch(function (e) { $('nubody').innerHTML = spanSeg() + '<div class="card ng">計算できませんでした（' + esc(e.message) + '）</div>'; });
   }
   $('nubody').addEventListener('click', function (e) {
+    var sp = e.target.closest('[data-span]');
+    if (sp) { nuSpan = Number(sp.dataset.span); openNu(); return; }
+    var dd = e.target.closest('[data-nday]');
+    if (dd) { nuSpan = 1; setView(dd.dataset.nday); openNu(); return; }
     var b = e.target.closest('[data-mode]'); if (!b) return;
     nuMode = b.dataset.mode; nuRender();
   });
   function nuRender() {
     var r = nuR, w = nuMode === 'with', rows = w ? r.rows : (r.rows0 || r.rows), p = w ? r.pfc : (r.pfc0 || r.pfc), kc = w ? r.kcal : (r.kcal0 != null ? r.kcal0 : r.kcal);
     var S = r.sup || { items: [], extra: {} };
-    var h = '<div class=seg><button data-mode=with class="' + (w ? 'on' : '') + '">💊 サプリ込み</button><button data-mode=food class="' + (w ? '' : 'on') + '">🍚 食事だけ</button></div>';
+    var h = spanSeg();
+    if (r.range) {
+      if (!r.nDays) { $('nubody').innerHTML = h + '<div class="card wait">この期間の食事の記録がありません</div>'; return; }
+      h += '<div class=card><b>' + r.span + '日間のうち、記録のある' + r.nDays + '日の1日あたり平均</b><div class=hint style="margin:4px 0 0">食事の記録が無い日は平均に入れていません。記録が少ない日（1食だけ等）があると、平均は少なめに出ます。</div></div>';
+    }
+    h += '<div class=seg><button data-mode=with class="' + (w ? 'on' : '') + '">💊 サプリ込み</button><button data-mode=food class="' + (w ? '' : 'on') + '">🍚 食事だけ</button></div>';
     // サプリで変わったところ（食事だけ → サプリ込み）
     if (r.rows0) {
       var chg = r.rows.map(function (a, i) { return { a: a, b: r.rows0[i] }; }).filter(function (o) { return o.a.sup > 0.0005; });
       var fixed = chg.filter(function (o) { return o.b.status !== 'ちょうど' && o.a.status === 'ちょうど'; }).length;
-      h += '<div class=card><b>サプリで変わったところ</b>';
-      if (!chg.length) h += '<div class=wait style="margin-top:4px">' + (S.items.length ? '今日のサプリには、表の栄養素の成分表示がありません' : '今日のサプリの記録がありません（「💊 サプリ」から入れられます）') + '</div>';
+      h += '<div class=card><b>サプリで変わったところ' + (r.range ? '（1日あたり平均）' : '') + '</b>';
+      if (!chg.length) h += '<div class=wait style="margin-top:4px">' + (S.items.length ? 'サプリには、表の栄養素の成分表示がありません' : 'サプリの記録がありません（「💊 サプリ」から入れられます）') + '</div>';
       else {
         h += '<div class=of style="margin-top:4px">' + (fixed ? '<span class=up>' + fixed + '項目</span>が「足りている」に変わりました' : '足りている／いないの判定は変わっていませんが、量は増えています') + '</div>'
           + '<table class="nt chg" style="margin-top:6px"><tr><td class=ref>栄養素</td><td class="ref" style="text-align:right">食事だけ</td><td class="ref" style="text-align:right">サプリ込み</td></tr>';
@@ -541,7 +557,17 @@
       }
       h += '</div>';
     }
-    h += '<div class=card><div class=of>エネルギー（' + (w ? 'サプリ込み' : '食事だけ') + '）</div><div><span style="font-size:26px;font-weight:bold">' + num(kc) + '</span> <span class=of>/ ' + num(r.target) + ' kcal</span></div>'
+    if (r.range) {
+      h += '<div class=card><b>日ごとの比較</b><div class=of style="margin-top:2px">「足りている」栄養素の数（全' + r.total + '項目）：食事だけ → サプリ込み</div>';
+      r.days.forEach(function (d) {
+        h += '<div class=hrow data-nday="' + esc(d.date) + '"><div class=dt>' + esc(jp(d.date)) + '</div><div class=bb>'
+          + '<div>' + d.ok0 + ' → <b>' + d.ok + '</b>項目' + (d.sup ? '<span class=ref>（💊' + d.sup + '品）</span>' : '<span class=ref>（サプリなし）</span>') + '</div>'
+          + ((w ? d.lack : d.lack0).length ? '<div class=ref>足りない：' + (w ? d.lack : d.lack0).map(esc).join('・') + '</div>' : '') + '</div>'
+          + '<div class=kk>' + num(d.kcal) + '<span class=ref> kcal</span></div></div>';
+      });
+      h += '<div class=hint style="margin-top:8px">日付を押すと、その日の栄養を開きます。「足りない」は上の切り替え（' + (w ? 'サプリ込み' : '食事だけ') + '）で見ています。</div></div>';
+    }
+    h += '<div class=card><div class=of>エネルギー（' + (r.range ? '1日あたり平均・' : '') + (w ? 'サプリ込み' : '食事だけ') + '）</div><div><span style="font-size:26px;font-weight:bold">' + num(kc) + '</span> <span class=of>/ ' + num(r.target) + ' kcal</span></div>'
       + '<div class=lbl style="margin-top:12px">PFCバランス（目標：たんぱく質13〜20%・脂質20〜30%・炭水化物50〜65%）</div>'
       + '<div class=pfc><div style="width:' + p.prot + '%;background:#2e7d4f">P ' + Math.round(p.prot) + '%</div><div style="width:' + p.fat + '%;background:#d28b26">F ' + Math.round(p.fat) + '%</div><div style="width:' + p.carb + '%;background:#4f7fbf">C ' + Math.round(p.carb) + '%</div></div></div>';
     h += '<div class=card><table class=nt>';
@@ -553,7 +579,7 @@
         + '<td style="text-align:right"><span class="st ' + cls + '">' + esc(x.status) + '</span></td></tr>';
     });
     h += '</table></div>';
-    h += '<div class=card><b>今日のサプリ</b><div style="margin-top:4px">' + (S.items.length ? S.items.map(function (x) { return '<span class=chip>' + esc(x.name) + ' ' + plain(x.amount) + esc(x.unit) + (x.share && x.share < 1 ? '<span class=ref>（家族で分けて自分の分）</span>' : '') + (x.noLabel ? '<span class=ref>（成分表示なし）</span>' : '') + '</span>'; }).join('') : '<span class=wait>記録がありません（「💊 サプリ」から入れられます）</span>') + '</div>'
+    h += '<div class=card><b>' + (r.range ? 'この期間のサプリ' : 'この日のサプリ') + '</b><div style="margin-top:4px">' + (S.items.length ? S.items.map(function (x) { return '<span class=chip>' + esc(x.name) + ' ' + plain(x.amount) + esc(x.unit) + (r.range ? '<span class=ref>（' + r.nDays + '日中' + x.days + '日）</span>' : '') + (x.share && x.share < 1 ? '<span class=ref>（家族で分けて自分の分）</span>' : '') + (x.noLabel ? '<span class=ref>（成分表示なし）</span>' : '') + '</span>'; }).join('') : '<span class=wait>記録がありません（「💊 サプリ」から入れられます）</span>') + '</div>'
         + (Object.keys(S.extra).length ? '<div class=ref style="margin-top:6px">表の外の成分（サプリ分）：' + Object.keys(S.extra).map(function (k) { return esc(k.replace(/\(.*\)/, '')) + ' ' + (Math.round(S.extra[k] * 100) / 100) + esc((k.match(/\((.*)\)/) || ['', ''])[1]); }).join('・') + '</div>' : '') + '</div>';
       h += '<div class=card><b>エッセンシャルオイル（サプリから）</b><div style="margin-top:4px">' + ((S.eo || []).length ? S.eo.map(function (x) { return '<span class=chip>' + esc(x.name) + (x.main ? '<span class=ref>（主な成分：' + esc(x.main) + '）</span>' : '') + '<span class=ref>／' + x.from.map(esc).join('・') + '</span></span>'; }).join('') : '<span class=wait>今日のサプリには含まれていません</span>') + '</div><div class=hint style="margin-top:8px">各製品の原材料名（「〜油」「香料（…）」）から拾っています。量は表示されていないため出していません。</div></div>';
       h += '<div class=card><b>フィトケミカル（含まれる主なもの）</b><div style="margin-top:4px">'

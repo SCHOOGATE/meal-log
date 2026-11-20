@@ -14,7 +14,7 @@
 //   ・フィトケミカルは成分表に無いので、料理ごとに「含まれる主なもの」の名前だけ（量は出さない）
 // v0.4 2026-11-19 ドテラのサプリ（公式ページの栄養成分表示・ラベル写真からの登録）を栄養に足す。耐容上限量（2025年版・男性30〜49歳）で上限超えを出す
 // v0.4.1 2026-11-19 サプリの原材料名からフィトケミカル・エッセンシャルオイルを出す（量は出さない）
-var VERSION = 'nutrition-app v0.5';
+var VERSION = 'nutrition-app v0.6';
 var MAP_MODEL = 'gemini-2.5-flash';       // 当てはめ用（考えない設定。11/19 試験で23品すべて正しい番号）
 var SH_FOOD = '成分表';
 var NUT_KEYS = ['kcal', 'prot', 'fat', 'carb', 'fib', 'salt', 'k', 'ca', 'mg', 'fe', 'zn', 'va', 'vd', 've', 'b1', 'b2', 'b6', 'b12', 'fol', 'vc'];
@@ -77,6 +77,7 @@ function doPost(e) {
     else if (q.action === 'ing') data = ing_(q);
     else if (q.action === 'learn') data = learn_(q.text);
     else if (q.action === 'nutri') data = nutri_(q.date);
+    else if (q.action === 'nutrirange') data = nutriRange_(q);
     else if (q.action === 'sup') data = supDay_(q.date);
     else if (q.action === 'supsave') data = supSave_(q);
     else if (q.action === 'suplabel') data = supLabel_(q);
@@ -486,28 +487,28 @@ function supLabel_(q) {
   return { ok: true, text: r.text, per: per + r.per_unit };
 }
 // その日のサプリの合計（栄養の画面用）
-function supTotals_(date) {
-  var M = supMaster_(), by = {}, tot = {}, extra = {}, items = [], phyto = [], eo = {};
+function supTotals_(date, M, logs) {
+  M = M || supMaster_();
+  var by = {}, tot = {}, extra = {}, items = [], phyto = [], eo = {};
   M.list.forEach(function (o) { by[o.id] = o; });
   NUT_KEYS.forEach(function (k) { tot[k] = 0; });
-  supLogs_(date).forEach(function (x) {
+  (logs || supLogs_(date)).forEach(function (x) {
     var o = by[x.id]; if (!o) return;
     NUT_KEYS.forEach(function (k) { if (o[k] != null) tot[k] += o[k] * x.amount; });
     Object.keys(o.extra).forEach(function (k) { extra[k] = (extra[k] || 0) + o.extra[k] * x.amount; });
     (o.phyto || []).forEach(function (p) { phyto.push({ name: p, from: o.name }); });
     (o.eo || []).forEach(function (e) { var k = e.name; (eo[k] = eo[k] || { name: k, main: e.main || '', from: [] }).from.push(o.name); });
-    items.push({ name: o.name, amount: x.amount, unit: o.unit, share: x.share, noLabel: NUT_KEYS.every(function (k) { return o[k] == null; }) && !Object.keys(o.extra).length });
+    items.push({ id: o.id, name: o.name, amount: x.amount, unit: o.unit, share: x.share, noLabel: NUT_KEYS.every(function (k) { return o[k] == null; }) && !Object.keys(o.extra).length });
   });
   return { tot: tot, extra: extra, items: items, phyto: phyto, eo: Object.keys(eo).map(function (k) { return eo[k]; }) };
 }
 
 // ---------- その日の栄養 ----------
-function nutri_(date) {
-  var D = day_(date), F = foods_();
-  var tot = {}, mapped = 0, all = 0, phyto = {};
+// 記録（料理の並び）から食事の栄養の合計を出す。phyto＝{名前:[料理名…]}
+function foodTot_(records, F) {
+  var tot = {}, mapped = 0, all = 0, phyto = {}, byMeal = {};
   NUT_KEYS.forEach(function (k) { tot[k] = 0; });
-  var byMeal = {};
-  D.records.forEach(function (rec) {
+  records.forEach(function (rec) {
     rec.dishes.forEach(function (d) {
       var p = d.shared ? d.portion : 1;
       (d.phyto || []).forEach(function (s) { (phyto[s] = phyto[s] || []).push(d.name); });
@@ -523,6 +524,11 @@ function nutri_(date) {
     });
     byMeal[rec.meal] = (byMeal[rec.meal] || 0) + rec.total;
   });
+  return { tot: tot, mapped: mapped, all: all, phyto: phyto, byMeal: byMeal };
+}
+function nutri_(date) {
+  var D = day_(date), F = foods_();
+  var FT = foodTot_(D.records, F), tot = FT.tot, mapped = FT.mapped, all = FT.all, phyto = FT.phyto, byMeal = FT.byMeal;
   // サプリを足す（食事の分は food に残す）
   var S = supTotals_(D.date), food = {};
   // サプリのフィトケミカル（原材料名から・量は不明）。「名前（原料）」の名前の部分で食事の分とまとめる
@@ -536,6 +542,48 @@ function nutri_(date) {
            phyto: Object.keys(phyto).map(function (s) { return { name: s, from: phyto[s].filter(function (v, i, a) { return a.indexOf(v) === i; }) }; }),
            source: '日本食品標準成分表（八訂）増補2023年／日本人の食事摂取基準（2025年版）男性30〜49歳' };
 }
+// ---------- 期間の栄養（v0.6）：記録のある日の1日あたり平均・サプリ込み／食事だけ・日ごとの判定 ----------
+// q = { days(7|30…), to('yyyy/MM/dd'・既定は今日) }
+function nutriRange_(q) {
+  var n = Math.min(90, Math.max(2, Number(q.days) || 7));
+  var to = String(q.to || fmt_(new Date(), 'yyyy/MM/dd'));
+  var tt = new Date(to.replace(/\//g, '-') + 'T12:00:00+09:00');
+  var from = fmt_(new Date(tt.getTime() - (n - 1) * 86400000), 'yyyy/MM/dd');
+  var R = recordsIn_(from, to), F = foods_(), M = supMaster_();
+  var logs = {}; supLogs_('').forEach(function (x) { if (x.date >= from && x.date <= to) (logs[x.date] = logs[x.date] || []).push(x); });
+  var dates = Object.keys(R).filter(function (d) { return R[d].length; }).sort();
+  var sumF = {}, sumS = {}, zero = {}, mapped = 0, all = 0, phyto = {}, items = {}, eo = {}, days = [];
+  NUT_KEYS.forEach(function (k) { sumF[k] = 0; sumS[k] = 0; zero[k] = 0; });
+  dates.forEach(function (d) {
+    var FT = foodTot_(R[d], F), S = supTotals_(d, M, logs[d] || []), w = {};
+    mapped += FT.mapped; all += FT.all;
+    NUT_KEYS.forEach(function (k) { sumF[k] += FT.tot[k]; sumS[k] += S.tot[k]; w[k] = FT.tot[k] + S.tot[k]; });
+    Object.keys(FT.phyto).forEach(function (p) { (phyto[p] = phyto[p] || []).push.apply(phyto[p], FT.phyto[p]); });
+    S.phyto.forEach(function (p) { var nm = p.name.split('（')[0]; (phyto[nm] = phyto[nm] || []).push('サプリ：' + p.from); });
+    S.items.forEach(function (x) { var o = items[x.id] = items[x.id] || { name: x.name, unit: x.unit, days: 0, sum: 0, noLabel: x.noLabel }; o.days++; o.sum += x.amount; });
+    (S.eo || []).forEach(function (e) { var o = eo[e.name] = eo[e.name] || { name: e.name, main: e.main, from: [] }; e.from.forEach(function (f) { if (o.from.indexOf(f) < 0) o.from.push(f); }); });
+    var A = judge_(w, S.tot, FT.tot).rows, B = judge_(FT.tot, zero, FT.tot).rows;
+    days.push({ date: d, kcal: Math.round(FT.tot.kcal), sup: S.items.length,
+                ok: A.filter(function (x) { return x.status === 'ちょうど'; }).length,
+                ok0: B.filter(function (x) { return x.status === 'ちょうど'; }).length,
+                lack: A.filter(function (x) { return /少ない/.test(x.status); }).map(function (x) { return x.name; }),
+                lack0: B.filter(function (x) { return /少ない/.test(x.status); }).map(function (x) { return x.name; }) });
+  });
+  var nd = dates.length || 1, avgF = {}, avgS = {}, avgT = {};
+  NUT_KEYS.forEach(function (k) { avgF[k] = sumF[k] / nd; avgS[k] = sumS[k] / nd; avgT[k] = avgF[k] + avgS[k]; });
+  var A = judge_(avgT, avgS, avgF), B = judge_(avgF, zero, avgF);
+  var tgt = Math.round(Number(book_().getSheetByName(SH_SET).getRange('B10').getValue()) || 1800);
+  return { range: true, from: from, to: to, span: n, nDays: dates.length, date: to,
+           kcal: Math.round(avgT.kcal), kcal0: Math.round(avgF.kcal), target: tgt,
+           rows: A.rows, pfc: A.pfc, rows0: B.rows, pfc0: B.pfc, days: days.reverse(), total: DRI_N_(),
+           sup: { items: Object.keys(items).map(function (k) { var o = items[k]; return { name: o.name, unit: o.unit, days: o.days, amount: Math.round(o.sum / o.days * 100) / 100, noLabel: o.noLabel }; }),
+                  extra: {}, eo: Object.keys(eo).map(function (k) { return eo[k]; }) },
+           coverage: all ? Math.round(mapped / all * 100) : 0,
+           phyto: Object.keys(phyto).map(function (s) { return { name: s, from: phyto[s].filter(function (v, i, a) { return a.indexOf(v) === i; }).slice(0, 4) }; }),
+           source: '日本食品標準成分表（八訂）増補2023年／日本人の食事摂取基準（2025年版）男性30〜49歳' };
+}
+function DRI_N_() { return Object.keys(DRI).length; }
+
 // 合計（tot）を摂取基準で判定する。supTot＝そのうちサプリの分（葉酸の上限はサプリの分だけで比べる）
 function judge_(tot, supTot, food) {
   var e = tot.kcal || 1;
@@ -611,12 +659,16 @@ function ensureDataCol_(sh) {
 // ---------- その日の記録（直す画面の一覧） ----------
 function day_(date) {
   date = String(date || fmt_(new Date(), 'yyyy/MM/dd'));
+  return { date: date, records: recordsIn_(date, date)[date] || [], today: today_(date) };
+}
+// from〜to（'yyyy/MM/dd'）の記録を日付ごとに → { 日付: [記録…] }（シートは1回だけ読む）
+function recordsIn_(from, to) {
   var sh = book_().getSheetByName(SH_LOG);
   var last = sh.getLastRow(), recs = {}, order = [];
   if (last >= 2) {
     sh.getRange(2, 1, last - 1, NCOL).getValues().forEach(function (r) {
       var d = r[0] instanceof Date ? fmt_(r[0], 'yyyy/MM/dd') : String(r[0]);
-      if (d !== date) return;
+      if (d < from || d > to) return;
       var id = String(r[C.id - 1]);
       if (!recs[id]) { recs[id] = { id: id, date: d, meal: String(r[C.meal - 1]), time: r[C.time - 1] instanceof Date ? fmt_(r[C.time - 1], 'HH:mm') : String(r[C.time - 1] || ''), dishes: [] }; order.push(id); }
       var dish;
@@ -628,11 +680,13 @@ function day_(date) {
       recs[id].dishes.push(dish);
     });
   }
-  var mo = { '朝食': 1, '昼食': 2, '夕食': 3, '間食': 4 };
-  var list = order.map(function (k) { return recs[k]; });
-  list.sort(function (a, b) { return (mo[a.meal] || 9) - (mo[b.meal] || 9) || (a.time < b.time ? -1 : 1); });
-  list.forEach(function (x) { x.total = x.dishes.reduce(function (s, d) { return s + dishKcal_(d); }, 0); });
-  return { date: date, records: list, today: today_(date) };
+  var mo = { '朝食': 1, '昼食': 2, '夕食': 3, '間食': 4 }, out = {};
+  order.forEach(function (k) { var x = recs[k]; (out[x.date] = out[x.date] || []).push(x); });
+  Object.keys(out).forEach(function (d) {
+    out[d].sort(function (a, b) { return (mo[a.meal] || 9) - (mo[b.meal] || 9) || (a.time < b.time ? -1 : 1); });
+    out[d].forEach(function (x) { x.total = x.dishes.reduce(function (s, dd) { return s + dishKcal_(dd); }, 0); });
+  });
+  return out;
 }
 
 // ---------- 切り抜いた写真を貼る ----------
