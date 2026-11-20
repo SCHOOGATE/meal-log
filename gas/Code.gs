@@ -202,10 +202,11 @@ var VOICE_PROMPT = [
   '・ingredients の name は、成分表で探しやすい名前にする（例：白米のご飯、鶏もも肉（皮つき・焼き））',
   '・phyto: その料理に含まれる代表的なフィトケミカルの名前を、確かなものだけ最大3つ。なければ空'
 ].join('\n');
-var VOICE_SCHEMA = { type: 'OBJECT', properties: {
+// DISH_SCHEMA より上にあるので、呼ばれた時に組み立てる
+function voiceSchema_() { return { type: 'OBJECT', properties: {
   transcript: { type: 'STRING' }, is_food: { type: 'BOOLEAN' }, dishes: { type: 'ARRAY', items: DISH_SCHEMA },
   meal: { type: 'STRING' }, day_offset: { type: 'INTEGER' }, time: { type: 'STRING' }, note: { type: 'STRING' }
-}, required: ['transcript', 'is_food', 'dishes', 'meal', 'day_offset', 'time', 'note'] };
+}, required: ['transcript', 'is_food', 'dishes', 'meal', 'day_offset', 'time', 'note'] }; }
 
 function voice_(q) {
   if (!q.b64) throw new Error('音声が空です');
@@ -216,7 +217,7 @@ function voice_(q) {
   var src = photoFolder_(spoke, '音声').createFile(Utilities.newBlob(Utilities.base64Decode(q.b64), mime, id + '.' + ext));
 
   var r = gemini_([{ text: VOICE_PROMPT + learned_() + '\n\n（話した日時：' + fmt_(spoke, 'yyyy/MM/dd HH:mm') + '）' },
-                   { inline_data: { mime_type: mime, data: q.b64 } }], VOICE_SCHEMA);
+                   { inline_data: { mime_type: mime, data: q.b64 } }], voiceSchema_());
   useLog_('音声', r._usage);
   var said = String(r.transcript || '');
   if (!r.is_food || !(r.dishes || []).length) return { id: id, isFood: false, transcript: said, note: r.note || '食べた物の話が聞き取れませんでした' };
