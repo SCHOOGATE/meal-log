@@ -14,7 +14,7 @@
 //   ・フィトケミカルは成分表に無いので、料理ごとに「含まれる主なもの」の名前だけ（量は出さない）
 // v0.4 2026-11-19 ドテラのサプリ（公式ページの栄養成分表示・ラベル写真からの登録）を栄養に足す。耐容上限量（2025年版・男性30〜49歳）で上限超えを出す
 // v0.4.1 2026-11-19 サプリの原材料名からフィトケミカル・エッセンシャルオイルを出す（量は出さない）
-var VERSION = 'nutrition-app v0.4.1';
+var VERSION = 'nutrition-app v0.5';
 var MAP_MODEL = 'gemini-2.5-flash';       // 当てはめ用（考えない設定。11/19 試験で23品すべて正しい番号）
 var SH_FOOD = '成分表';
 var NUT_KEYS = ['kcal', 'prot', 'fat', 'carb', 'fib', 'salt', 'k', 'ca', 'mg', 'fe', 'zn', 'va', 'vd', 've', 'b1', 'b2', 'b6', 'b12', 'fol', 'vc'];
@@ -69,10 +69,12 @@ function doPost(e) {
     if (q.action === 'ping') data = VERSION;
     else if (q.action === 'photo') data = photo_(q);
     else if (q.action === 'crop') data = crop_(q);
-    else if (q.action === 'today') data = today_();
+    else if (q.action === 'today') data = today_(q.date);
+    else if (q.action === 'history') data = history_(q.days);
     else if (q.action === 'day') data = day_(q.date);
     else if (q.action === 'save') data = save_(q);
     else if (q.action === 'estimate') data = estimate_(q);
+    else if (q.action === 'ing') data = ing_(q);
     else if (q.action === 'learn') data = learn_(q.text);
     else if (q.action === 'nutri') data = nutri_(q.date);
     else if (q.action === 'sup') data = supDay_(q.date);
@@ -175,7 +177,7 @@ function photo_(q) {
   if (r.note) sh.getRange(start, C.note).setValue(String(r.note));
   return { id: id, isFood: true, meal: meal, date: base.date, time: base.time, dishes: dishes,
            total: dishes.reduce(function (s, d) { return s + dishKcal_(d); }, 0),
-           crop: r.crop || null, note: r.note || '', today: today_() };
+           crop: r.crop || null, note: r.note || '', today: today_(base.date) };
 }
 
 function mealOf_(d) {
@@ -287,6 +289,34 @@ function estimate_(q) {
   return mapDishes_((r.dishes || []).map(normDish_));
 }
 
+// ---------- 材料を1つ直す・足す（v0.5） ----------
+// q = { dish(料理名), text('にんじん 30g' など・足すとき) | name(直した材料名) + grams(今の量) }
+// → { name, amount, grams, kcal, g0, k0, c, fn }（成分表に当てはめて kcal を出す）
+function ing_(q) {
+  var dish = String(q.dish || '').trim();
+  var text = String(q.text || q.name || '').trim();
+  if (!text) throw new Error('材料名を書いてください');
+  var keepG = Number(q.grams) || 0;   // 名前だけ直したとき：量はそのまま
+  var prompt = [
+    '料理「' + (dish || '不明') + '」の材料「' + text + '」を、病院の「食事内容記録表」の材料1つとして書いてください。',
+    '・name は成分表で探しやすい名前（例：にんじん（ゆで）、かぼちゃ（ゆで）、マヨネーズ（全卵型））',
+    '・amount は家庭で分かる単位、grams は推定グラム。量が書いてあればその量にする。書いていなければこの料理1人前に入る一般的な量',
+    '・kcal は日本食品標準成分表（八訂）の値を目安に計算',
+    '・日本語で答える'
+  ].join('\n') + learned_();
+  var r = gemini_([{ text: prompt }], ING_SCHEMA, { think: 0, temp: 0 });
+  useLog_('材料', r._usage);
+  var x = { name: String(r.name || text), amount: String(r.amount || ''), grams: Number(r.grams) || 0, kcal: Math.round(Number(r.kcal) || 0) };
+  if (q.name && !q.text) x.name = text;   // 直した名前は本人の書いたとおりに残す
+  if (keepG > 0) {
+    if (x.grams > 0) x.kcal = Math.round(x.kcal * keepG / x.grams);
+    x.grams = keepG;
+    x.amount = '約' + keepG + 'g';
+  }
+  var d = normDish_({ name: dish || text, ings: [x] });
+  return mapDishes_([d])[0].ings[0];
+}
+
 // ---------- 成分表（シート「成分表」：食品番号・食品名・100gあたりの値） ----------
 var FOODS_ = null;
 function foods_() {
@@ -381,9 +411,10 @@ function supMaster_() {
 function supLogs_(date) {
   var sh = book_().getSheetByName(SH_SUPLOG);
   if (!sh || sh.getLastRow() < 2) return [];
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues().map(function (r, i) {
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues().map(function (r, i) {
     var d = r[0] instanceof Date ? fmt_(r[0], 'yyyy/MM/dd') : String(r[0]);
-    return { row: i + 2, date: d, id: String(r[1]), name: String(r[2]), amount: Number(r[3]) || 0, unit: String(r[4]) };
+    // G列＝家族で分けたときの自分の割合（空なら全部＝1）。量（D列）は自分が飲んだ分
+    return { row: i + 2, date: d, id: String(r[1]), name: String(r[2]), amount: Number(r[3]) || 0, unit: String(r[4]), share: Number(r[6]) || 1 };
   }).filter(function (x) { return !date || x.date === date; });
 }
 function supDay_(date) {
@@ -408,9 +439,14 @@ function supSave_(q) {
   var old = supLogs_(date).map(function (x) { return x.row; }).sort(function (a, b) { return b - a; });
   old.forEach(function (r) { sh.deleteRow(r); });
   var at = fmt_(new Date(), 'yyyy/MM/dd HH:mm');
+  if (String(sh.getRange(1, 7).getValue()) !== '分けた割合') sh.getRange(1, 7).setValue('分けた割合').setFontWeight('bold');
+  // amount＝自分が飲んだ量（全体×割合）。share＝自分の割合（全部なら空）
   var rows = (q.items || []).filter(function (x) { return by[x.id] && Number(x.amount) > 0; })
-    .map(function (x) { var o = by[x.id]; return [date, o.id, o.name, Number(x.amount), o.unit, at]; });
-  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 6).setValues(rows);
+    .map(function (x) {
+      var o = by[x.id], s = Number(x.share) || 1;
+      return [date, o.id, o.name, Math.round(Number(x.amount) * 1000) / 1000, o.unit, at, s < 1 ? Math.round(s * 1000) / 1000 : ''];
+    });
+  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, 7).setValues(rows);
   return { saved: rows.length };
 }
 // ラベル（栄養成分表示）の写真 → 1単位あたりの値をサプリ表に書く。q = { id, b64 }
@@ -460,7 +496,7 @@ function supTotals_(date) {
     Object.keys(o.extra).forEach(function (k) { extra[k] = (extra[k] || 0) + o.extra[k] * x.amount; });
     (o.phyto || []).forEach(function (p) { phyto.push({ name: p, from: o.name }); });
     (o.eo || []).forEach(function (e) { var k = e.name; (eo[k] = eo[k] || { name: k, main: e.main || '', from: [] }).from.push(o.name); });
-    items.push({ name: o.name, amount: x.amount, unit: o.unit, noLabel: NUT_KEYS.every(function (k) { return o[k] == null; }) && !Object.keys(o.extra).length });
+    items.push({ name: o.name, amount: x.amount, unit: o.unit, share: x.share, noLabel: NUT_KEYS.every(function (k) { return o[k] == null; }) && !Object.keys(o.extra).length });
   });
   return { tot: tot, extra: extra, items: items, phyto: phyto, eo: Object.keys(eo).map(function (k) { return eo[k]; }) };
 }
@@ -492,8 +528,19 @@ function nutri_(date) {
   // サプリのフィトケミカル（原材料名から・量は不明）。「名前（原料）」の名前の部分で食事の分とまとめる
   S.phyto.forEach(function (p) { var nm = p.name.split('（')[0]; (phyto[nm] = phyto[nm] || []).push('サプリ：' + p.from); });
   NUT_KEYS.forEach(function (k) { food[k] = tot[k]; tot[k] += S.tot[k]; });
+  var zero = {}; NUT_KEYS.forEach(function (k) { zero[k] = 0; });
+  var A = judge_(tot, S.tot, food), B = judge_(food, zero, food);   // A＝サプリ込み・B＝食事だけ
+  return { date: D.date, kcal: Math.round(tot.kcal), kcal0: Math.round(food.kcal), target: D.today.target,
+           rows: A.rows, pfc: A.pfc, rows0: B.rows, pfc0: B.pfc, sup: S,
+           coverage: all ? Math.round(mapped / all * 100) : 0, byMeal: byMeal,
+           phyto: Object.keys(phyto).map(function (s) { return { name: s, from: phyto[s].filter(function (v, i, a) { return a.indexOf(v) === i; }) }; }),
+           source: '日本食品標準成分表（八訂）増補2023年／日本人の食事摂取基準（2025年版）男性30〜49歳' };
+}
+// 合計（tot）を摂取基準で判定する。supTot＝そのうちサプリの分（葉酸の上限はサプリの分だけで比べる）
+function judge_(tot, supTot, food) {
   var e = tot.kcal || 1;
   var pfc = { prot: tot.prot * 4 / e * 100, fat: tot.fat * 9 / e * 100, carb: tot.carb * 4 / e * 100 };
+  var S = { tot: supTot };
   var rows = Object.keys(DRI).map(function (k) {
     var g = DRI[k], v = tot[k], st = '', ref = '', base = { key: k, name: g.name, unit: g.unit, value: v, food: food[k], sup: S.tot[k], kind: g.kind };
     if (g.pe) {
@@ -514,10 +561,7 @@ function nutri_(date) {
     }
     base.ref = ref; base.status = st; base.ratio = v / g.min; return base;
   });
-  return { date: D.date, kcal: Math.round(tot.kcal), target: D.today.target, rows: rows, pfc: pfc, sup: S,
-           coverage: all ? Math.round(mapped / all * 100) : 0, byMeal: byMeal,
-           phyto: Object.keys(phyto).map(function (s) { return { name: s, from: phyto[s].filter(function (v, i, a) { return a.indexOf(v) === i; }) }; }),
-           source: '日本食品標準成分表（八訂）増補2023年／日本人の食事摂取基準（2025年版）男性30〜49歳' };
+  return { rows: rows, pfc: pfc };
 }
 
 // ---------- 記録を書き換える（直す画面の「保存」） ----------
@@ -533,7 +577,7 @@ function save_(q) {
   if (!dishes.length) {
     // 全部消した：写真ごと記録を消す
     sh.deleteRows(first, old);
-    return { deleted: true, today: today_() };
+    return { deleted: true, today: today_(q.date) };
   }
   var d = new Date(String(q.date).replace(/\//g, '-') + 'T12:00:00+09:00');
   var at = sh.getRange(first, C.at).getValue();
@@ -545,7 +589,7 @@ function save_(q) {
   writeRows_(sh, first, rowsOf_(dishes, base));
   var note = String(sh.getRange(first, C.note).getValue() || '');
   if (note.indexOf('画面で修正') < 0) sh.getRange(first, C.note).setValue((note ? note + '／' : '') + '画面で修正 ' + fmt_(new Date(), 'MM/dd HH:mm'));
-  return { saved: n, total: dishes.reduce(function (s, x) { return s + dishKcal_(x); }, 0), today: today_() };
+  return { saved: n, total: dishes.reduce(function (s, x) { return s + dishKcal_(x); }, 0), today: today_(q.date) };
 }
 
 function rowsById_(sh, id) {
@@ -588,7 +632,7 @@ function day_(date) {
   var list = order.map(function (k) { return recs[k]; });
   list.sort(function (a, b) { return (mo[a.meal] || 9) - (mo[b.meal] || 9) || (a.time < b.time ? -1 : 1); });
   list.forEach(function (x) { x.total = x.dishes.reduce(function (s, d) { return s + dishKcal_(d); }, 0); });
-  return { date: date, records: list, today: today_() };
+  return { date: date, records: list, today: today_(date) };
 }
 
 // ---------- 切り抜いた写真を貼る ----------
@@ -613,10 +657,10 @@ function crop_(q) {
 }
 
 // ---------- 今日の合計 ----------
-function today_() {
+function today_(date) {
   var ss = book_();
   var sh = ss.getSheetByName(SH_LOG);
-  var day = fmt_(new Date(), 'yyyy/MM/dd');
+  var day = String(date || fmt_(new Date(), 'yyyy/MM/dd'));
   var total = 0, last = sh.getLastRow();
   if (last >= 2) {
     sh.getRange(2, 1, last - 1, C.kcal).getValues().forEach(function (r) {
@@ -628,6 +672,31 @@ function today_() {
 }
 
 // ---------- 利用ログ（費用の実測用） ----------
+// ---------- これまでの記録（v0.5）：日ごとのカロリー合計・品数・サプリの有無 ----------
+function history_(days) {
+  days = Math.min(120, Math.max(1, Number(days) || 60));
+  var ss = book_(), sh = ss.getSheetByName(SH_LOG), last = sh.getLastRow(), by = {};
+  var from = fmt_(new Date(Date.now() - (days - 1) * 86400000), 'yyyy/MM/dd');
+  if (last >= 2) {
+    sh.getRange(2, 1, last - 1, C.id).getValues().forEach(function (r) {
+      var d = r[0] instanceof Date ? fmt_(r[0], 'yyyy/MM/dd') : String(r[0]);
+      if (!/^\d{4}\/\d{2}\/\d{2}$/.test(d) || d < from) return;
+      var o = by[d] = by[d] || { date: d, dow: String(r[1] || ''), kcal: 0, ids: {}, meals: {} };
+      o.kcal += Number(r[C.kcal - 1]) || 0; o.ids[String(r[C.id - 1])] = 1; o.meals[String(r[C.meal - 1])] = 1;
+    });
+  }
+  supLogs_('').forEach(function (x) {
+    if (x.date < from) return;
+    var o = by[x.date] = by[x.date] || { date: x.date, dow: '', kcal: 0, ids: {}, meals: {} };
+    o.sup = (o.sup || 0) + 1;
+  });
+  var target = Math.round(Number(ss.getSheetByName(SH_SET).getRange('B10').getValue()) || 1800);
+  return { target: target, days: Object.keys(by).sort().reverse().map(function (k) {
+    var o = by[k];
+    return { date: o.date, dow: o.dow, kcal: Math.round(o.kcal), records: Object.keys(o.ids).length, meals: Object.keys(o.meals).filter(String), sup: o.sup || 0 };
+  }) };
+}
+
 function useLog_(kind, u) {
   try {
     var inT = Number(u.promptTokenCount) || 0;
