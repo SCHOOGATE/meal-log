@@ -24,7 +24,8 @@
   .bar i{display:block;height:100%;background:var(--green);width:0}
   .bar.over i{background:var(--red)}
   .btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;padding:24px 0;font-size:22px;font-weight:bold;border:0;border-radius:18px;background:var(--green);color:#fff;margin-top:14px;font-family:inherit;cursor:pointer}
-  .btn.voice{background:#fff;color:#9aa39e;border:2px dashed #c7cec9;font-size:17px;padding:16px 0}
+  .btn.voice{background:#fff;color:var(--green2);border:2px solid var(--green);font-size:20px;padding:18px 0}
+  .btn.voice.rec{background:var(--red);color:#fff;border-color:var(--red)}
   .row{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:14px;color:var(--sub)}
   select,input[type=text],input[type=time],input[type=number],textarea{padding:10px;font-size:16px;border:1px solid var(--line);border-radius:10px;background:#fff;color:#222;font-family:inherit}
   .row select{flex:1}
@@ -121,7 +122,8 @@
   <a class="lib" href="#" id="libbtn">撮った写真から選ぶ（複数可）</a>
   <input id="lib" type="file" accept="image/*" multiple>
 
-  <button class="btn voice" type="button" disabled>🎤 音声で記録（次の段階で使えるようにします）</button>
+  <button class="btn voice" id="vbtn" type="button">🎤 音声で記録</button>
+  <p class="hint" style="margin-top:6px">例：「夜ごはん。カレーライス大盛り、サラダ、ビール1本」「昨日の昼、ざるそば1枚」</p>
 
   <div class="row">区分
     <select id="meal"><option>自動</option><option>朝食</option><option>昼食</option><option>夕食</option><option>間食</option></select>
@@ -182,7 +184,7 @@
 <script>
 (function () {
   'use strict';
-  var VERSION = 'nutrition-web v0.6';
+  var VERSION = 'nutrition-web v0.7';
   var KEY = 'nutri_cfg';
 
   function $(i) { return document.getElementById(i); }
@@ -349,6 +351,69 @@
       setTimeout(function () { d.remove(); }, 8000);
     }).catch(function (e) { d.innerHTML = '<span class=ng>うまくいきませんでした（' + esc(e.message) + '）。もう一度お試しください</span>'; });
   }
+  // ---- 音声：録音 → 16kHz・モノラルの WAV にして送る（Gemini が確実に読める形） ----
+  var rec = null;
+  function wavB64(blob) {
+    return blob.arrayBuffer().then(function (buf) {
+      var AC = window.AudioContext || window.webkitAudioContext, ac = new AC();
+      return new Promise(function (ok, ng) { ac.decodeAudioData(buf, ok, ng); }).then(function (ab) {
+        var rate = 16000, src = ab.getChannelData(0), ratio = ab.sampleRate / rate, n = Math.floor(src.length / ratio);
+        var out = new DataView(new ArrayBuffer(44 + n * 2));
+        function str(o, t) { for (var i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); }
+        str(0, 'RIFF'); out.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+        out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true);
+        out.setUint32(28, rate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true); str(36, 'data'); out.setUint32(40, n * 2, true);
+        for (var i = 0; i < n; i++) { var v = Math.max(-1, Math.min(1, src[Math.floor(i * ratio)])); out.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7FFF, true); }
+        try { ac.close(); } catch (e) {}
+        var b = new Uint8Array(out.buffer), s = '';
+        for (var k = 0; k < b.length; k += 0x8000) s += String.fromCharCode.apply(null, b.subarray(k, k + 0x8000));
+        return { b64: btoa(s), mime: 'audio/wav' };
+      });
+    });
+  }
+  function rawB64(blob) {
+    return new Promise(function (ok) { var fr = new FileReader(); fr.onload = function () { ok({ b64: String(fr.result).split(',')[1], mime: blob.type || 'audio/webm' }); }; fr.readAsDataURL(blob); });
+  }
+  function vLabel(t) { $('vbtn').textContent = t; }
+  $('vbtn').addEventListener('click', function () {
+    if (rec) { rec.stop(); return; }
+    if (!navigator.mediaDevices || !window.MediaRecorder) { msg('<span class=ng>このブラウザでは録音できません（Chrome で開いてください）</span>'); return; }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      var chunks = [], t0 = Date.now(), timer;
+      rec = new MediaRecorder(stream);
+      rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+      rec.onstop = function () {
+        clearInterval(timer); stream.getTracks().forEach(function (t) { t.stop(); });
+        rec = null; $('vbtn').classList.remove('rec'); vLabel('🎤 音声で記録');
+        var blob = new Blob(chunks, { type: chunks[0] ? chunks[0].type : 'audio/webm' });
+        if (Date.now() - t0 < 1200 || !blob.size) { msg('<span class=ng>短すぎて聞き取れませんでした。もう一度話してください</span>'); return; }
+        queue = queue.then(function () { return sendVoice(blob, t0).then(waitEdClosed); });
+      };
+      rec.start(1000);
+      $('vbtn').classList.add('rec');
+      timer = setInterval(function () {
+        var s = Math.floor((Date.now() - t0) / 1000);
+        vLabel('■ 話し終わったら押す（' + Math.floor(s / 60) + ':' + pad(s % 60) + '）');
+        if (s >= 90 && rec) rec.stop();   // 長すぎると読み取りが高く・遅くなるので90秒で止める
+      }, 250);
+      vLabel('■ 話し終わったら押す（0:00）');
+    }).catch(function (e) { msg('<span class=ng>マイクが使えません（' + esc(e.message) + '）。ブラウザの設定でマイクを許可してください</span>'); });
+  });
+  function sendVoice(blob, ts) {
+    var d = msg('<span class=wait>音声を聞き取っています…（10〜20秒）</span>');
+    return wavB64(blob).catch(function () { return rawB64(blob); }).then(function (a) {
+      return api('voice', { b64: a.b64, mime: a.mime, ts: ts, meal: $('meal').value });
+    }).then(function (r) {
+      if (!r.isFood) { d.innerHTML = '<span class=ng>食べた物の話が聞き取れませんでした</span>' + (r.transcript ? '<div class=note>🎤「' + esc(r.transcript) + '」</div>' : '') + '<div class=note>' + esc(r.note) + '</div>'; return; }
+      d.innerHTML = '<span class=ok>' + esc(r.meal) + '（' + esc(r.time) + '）を記録しました。量を確かめて「保存」を押してください</span>';
+      if (r.date !== viewDate) setView(r.date);
+      showSum(r.today);
+      openEd({ id: r.id, date: r.date, meal: r.meal, time: r.time, dishes: r.dishes }, null, '🎤「' + r.transcript + '」' + (r.note ? '\n' + r.note : ''));
+      loadDay();
+      setTimeout(function () { d.remove(); }, 8000);
+    }).catch(function (e) { d.innerHTML = '<span class=ng>うまくいきませんでした（' + esc(e.message) + '）。もう一度お試しください</span>'; });
+  }
+
   var queue = Promise.resolve();
   function pick(ev) {
     var fs = Array.prototype.slice.call(ev.target.files || []); ev.target.value = '';
@@ -373,7 +438,7 @@
 
   function openEd(rec, img, note) {
     cur = rec;
-    $('edmsg').innerHTML = note ? '<div class=note>📝 ' + esc(note) + '</div>' : '';
+    $('edmsg').innerHTML = note ? '<div class=note style="white-space:pre-line">' + (/^🎤/.test(note) ? '' : '📝 ') + esc(note) + '</div>' : '';
     $('edimg').innerHTML = img ? '<img src="' + img + '" alt="料理の写真">' : '';
     $('edmeal').value = rec.meal || '間食';
     $('edtime').value = /^\d{2}:\d{2}$/.test(rec.time || '') ? rec.time : '';

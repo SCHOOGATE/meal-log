@@ -14,7 +14,7 @@
 //   ・フィトケミカルは成分表に無いので、料理ごとに「含まれる主なもの」の名前だけ（量は出さない）
 // v0.4 2026-11-19 ドテラのサプリ（公式ページの栄養成分表示・ラベル写真からの登録）を栄養に足す。耐容上限量（2025年版・男性30〜49歳）で上限超えを出す
 // v0.4.1 2026-11-19 サプリの原材料名からフィトケミカル・エッセンシャルオイルを出す（量は出さない）
-var VERSION = 'nutrition-app v0.6';
+var VERSION = 'nutrition-app v0.7';
 var MAP_MODEL = 'gemini-2.5-flash';       // 当てはめ用（考えない設定。11/19 試験で23品すべて正しい番号）
 var SH_FOOD = '成分表';
 var NUT_KEYS = ['kcal', 'prot', 'fat', 'carb', 'fib', 'salt', 'k', 'ca', 'mg', 'fe', 'zn', 'va', 'vd', 've', 'b1', 'b2', 'b6', 'b12', 'fol', 'vc'];
@@ -68,6 +68,7 @@ function doPost(e) {
     var data;
     if (q.action === 'ping') data = VERSION;
     else if (q.action === 'photo') data = photo_(q);
+    else if (q.action === 'voice') data = voice_(q);
     else if (q.action === 'crop') data = crop_(q);
     else if (q.action === 'today') data = today_(q.date);
     else if (q.action === 'history') data = history_(q.days);
@@ -179,6 +180,68 @@ function photo_(q) {
   return { id: id, isFood: true, meal: meal, date: base.date, time: base.time, dishes: dishes,
            total: dishes.reduce(function (s, d) { return s + dishKcal_(d); }, 0),
            crop: r.crop || null, note: r.note || '', today: today_(base.date) };
+}
+
+// ---------- 音声で記録（v0.7） ----------
+// q = { b64(音声), mime('audio/wav' など), ts(話した時刻ミリ秒), meal('自動'|'朝食'|…) }
+var VOICE_PROMPT = [
+  'これは、食事の記録のために本人がスマホに話した音声です。病院の栄養指導に出す「食事内容記録表」（献立名・材料名・分量）を埋めるために聞き取ってください。',
+  '・transcript: 話した言葉をそのまま書き起こす（言い直し・えーと等は省いてよい）',
+  '・dishes: 食べた料理と飲み物を1品ずつ。材料・量・カロリーの書き方は下の【書き方】に従う。量が言われていなければ一般的な1人前',
+  '・「半分」「大盛り」「2杯」「少し」などの言葉は量に反映する。家族で分けた・鍋を取り分けた料理は shared を true にし、全体の量で書く',
+  '・meal: 話の中に「朝」「昼」「夜」「おやつ」などがあれば 朝食／昼食／夕食／間食。なければ空文字',
+  '・day_offset: 「昨日」なら -1、「おととい」なら -2。言っていなければ 0',
+  '・time: 「7時ごろ」「19時」など時刻を言っていれば 24時間の "HH:mm"（夜の7時→19:00）。なければ空文字',
+  '・is_food: 食べた物・飲んだ物の話が無ければ false',
+  '・note: 聞き取りにくかった点・判断に迷った点を短く。なければ空文字',
+  '・日本語で答える',
+  '',
+  '【書き方】',
+  '・amount は家庭で分かる単位、grams は推定グラム（飲み物はmlをgとしてよい）、kcal は日本食品標準成分表（八訂）の値を目安に計算',
+  '・唐揚げ・コロッケ・餃子など、料理そのものが成分表に1つの食品として載っているものは1つの材料にする',
+  '・ingredients の name は、成分表で探しやすい名前にする（例：白米のご飯、鶏もも肉（皮つき・焼き））',
+  '・phyto: その料理に含まれる代表的なフィトケミカルの名前を、確かなものだけ最大3つ。なければ空'
+].join('\n');
+var VOICE_SCHEMA = { type: 'OBJECT', properties: {
+  transcript: { type: 'STRING' }, is_food: { type: 'BOOLEAN' }, dishes: { type: 'ARRAY', items: DISH_SCHEMA },
+  meal: { type: 'STRING' }, day_offset: { type: 'INTEGER' }, time: { type: 'STRING' }, note: { type: 'STRING' }
+}, required: ['transcript', 'is_food', 'dishes', 'meal', 'day_offset', 'time', 'note'] };
+
+function voice_(q) {
+  if (!q.b64) throw new Error('音声が空です');
+  var mime = String(q.mime || 'audio/wav').split(';')[0];
+  var spoke = new Date(Number(q.ts) || Date.now());
+  var id = fmt_(new Date(), 'yyyyMMdd-HHmmss') + '-' + Math.random().toString(36).slice(2, 6);
+  var ext = { 'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3' }[mime] || 'bin';
+  var src = photoFolder_(spoke, '音声').createFile(Utilities.newBlob(Utilities.base64Decode(q.b64), mime, id + '.' + ext));
+
+  var r = gemini_([{ text: VOICE_PROMPT + learned_() + '\n\n（話した日時：' + fmt_(spoke, 'yyyy/MM/dd HH:mm') + '）' },
+                   { inline_data: { mime_type: mime, data: q.b64 } }], VOICE_SCHEMA);
+  useLog_('音声', r._usage);
+  var said = String(r.transcript || '');
+  if (!r.is_food || !(r.dishes || []).length) return { id: id, isFood: false, transcript: said, note: r.note || '食べた物の話が聞き取れませんでした' };
+
+  // いつ食べたか：「昨日」「7時ごろ」を反映（なければ話した時刻）
+  var off = Math.max(-7, Math.min(0, Number(r.day_offset) || 0));
+  var when = new Date(spoke.getTime() + off * 86400000);
+  var tm = /^(\d{1,2}):(\d{2})$/.exec(String(r.time || '').trim());
+  var date = fmt_(when, 'yyyy/MM/dd'), time = tm ? ('0' + Number(tm[1])).slice(-2) + ':' + tm[2] : fmt_(when, 'HH:mm');
+  var MEALS = { '朝食': 1, '昼食': 1, '夕食': 1, '間食': 1 };
+  var meal = (q.meal && q.meal !== '自動') ? q.meal : MEALS[r.meal] ? r.meal
+    : mealOf_(new Date(date.replace(/\//g, '-') + 'T' + time + ':00+09:00'));
+  var dd = new Date(date.replace(/\//g, '-') + 'T12:00:00+09:00');
+
+  var dishes = mapDishes_((r.dishes || []).map(normDish_));
+  var base = { date: date, dow: dow_(dd), meal: meal, time: time, id: id, at: fmt_(new Date(), 'yyyy/MM/dd HH:mm') };
+  var sh = book_().getSheetByName(SH_LOG);
+  ensureDataCol_(sh);
+  var start = sh.getLastRow() + 1;
+  writeRows_(sh, start, rowsOf_(dishes, base));
+  sh.getRange(start, C.src).setValue(src.getUrl());
+  sh.getRange(start, C.note).setValue(('🎤「' + said + '」' + (r.note ? '／' + r.note : '')).slice(0, 500));
+  return { id: id, isFood: true, meal: meal, date: date, time: time, dishes: dishes, transcript: said,
+           total: dishes.reduce(function (s, d) { return s + dishKcal_(d); }, 0),
+           note: r.note || '', today: today_(date) };
 }
 
 function mealOf_(d) {
